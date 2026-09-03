@@ -1,0 +1,36 @@
+# Dev local sem instalar Node/Python na máquina. O Supabase é um projeto CLOUD
+# (não sobe aqui). Rode:  docker compose up --build
+#
+# Sem Docker? Use os scripts npm da raiz:  npm run dev
+services:
+  parser:
+    build: ./parser
+    ports:
+      - "8100:8100"
+    environment:
+      PARSER_PORT: "8100"
+      PARSER_SHARED_SECRET: ${PARSER_SHARED_SECRET:-dev-secret}
+    volumes:
+      - ./parser:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      BACKEND_PORT: "8080"
+      NODE_ENV: development
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      PARSER_URL: http://parser:8100
+      PARSER_SHARED_SECRET: ${PARSER_SHARED_SECRET:-dev-secret}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+    depends_on:
+      - parser
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run dev

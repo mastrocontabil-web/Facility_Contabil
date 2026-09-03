@@ -1,0 +1,8 @@
+# Normaliza para LF no repo (evita churn no Windows).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.xlsx binary
+*.xls binary

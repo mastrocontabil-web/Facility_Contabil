@@ -1,0 +1,46 @@
+# deps
+node_modules/
+.pnp/
+.venv/
+__pycache__/
+*.pyc
+
+# build
+dist/
+build/
+*.tsbuildinfo
+frontend/dist/
+backend/dist/
+
+# env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# runtime
+parser/.pytest_cache/
+coverage/
+*.local
+
+# uploads de teste locais
+tmp/
+uploads/
+
+# scratch de debug
+backend/_*.txt
+backend/_*.mjs
+
+# caminhos locais com dados de cliente (só testes golden)
+parser/tests/local_paths.py
