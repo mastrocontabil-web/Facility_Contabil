@@ -28,7 +28,9 @@ export type ClientInput = {
 };
 
 export type Direction = 'entrada' | 'saida';
-export type StatementStatus = 'parsing' | 'revisao' | 'gerado' | 'erro';
+export type StatementStatus = 'parsing' | 'classificacao' | 'revisao' | 'gerado' | 'erro';
+export type ComplementoModo = 'extrato' | 'complemento' | 'ambos' | 'extrato_classificacao' | 'tudo';
+export type OrigemModulo = 'importacao' | 'classificacao';
 
 export type StatementTotais = {
   qtd: number;
@@ -52,8 +54,9 @@ export type Statement = {
   lote_numero: number;
   saldo_inicial: string | null;
   saldo_final: string | null;
-  complemento_modo: 'extrato' | 'complemento' | 'ambos';
+  complemento_modo: ComplementoModo;
   status: StatementStatus;
+  origem_modulo: OrigemModulo;
   erro_msg: string | null;
   totais: StatementTotais | Record<string, never>;
   created_at: string;
@@ -75,6 +78,17 @@ export type Transaction = {
   ignorado: boolean;
   regra_id: string | null;
   origem_preenchimento: 'vazio' | 'manual' | 'regra' | 'memoria' | 'conferir';
+  classificacao_id: string | null;
+};
+
+export type Classificacao = {
+  id: string;
+  client_id: string;
+  direction: Direction;
+  nome: string;
+  ativo: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
 export type MatchType = 'contains' | 'starts_with' | 'regex' | 'exact';

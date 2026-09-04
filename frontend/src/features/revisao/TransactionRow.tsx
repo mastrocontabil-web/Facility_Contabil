@@ -1,7 +1,6 @@
 import { memo } from 'react';
 import { formatDate, formatMoney } from '@/lib/format';
-import type { Transaction } from '@/lib/types';
-import type { ComplementoModo } from './BulkBar';
+import type { ComplementoModo, Transaction } from '@/lib/types';
 import { composeComplemento } from './complemento';
 import type { RowDraft } from './useRevisaoDraft';
 
@@ -10,15 +9,22 @@ export const TransactionRow = memo(function TransactionRow({
   draft,
   onPatch,
   complementoModo,
+  classificacaoNome,
 }: {
   txn: Transaction;
   draft: RowDraft;
   onPatch: (patch: Partial<RowDraft>) => void;
   complementoModo: ComplementoModo;
+  classificacaoNome?: string | null;
 }) {
   const ign = draft.ignorado;
   const cents = Math.round(Number(txn.valor) * 100);
-  const preview = composeComplemento(complementoModo, txn.descricao_raw, draft.hist_complemento);
+  const preview = composeComplemento(
+    complementoModo,
+    txn.descricao_raw,
+    draft.hist_complemento,
+    classificacaoNome ?? '',
+  );
 
   return (
     <tr className={ign ? 'bg-slate-50 text-slate-400' : ''}>
@@ -47,6 +53,9 @@ export const TransactionRow = memo(function TransactionRow({
         >
           {txn.direction === 'entrada' ? 'ent' : 'saí'}
         </span>
+      </td>
+      <td className="max-w-[9rem] truncate px-2 py-1 text-[11px] text-slate-500" title={classificacaoNome ?? ''}>
+        {classificacaoNome || <span className="text-slate-300">—</span>}
       </td>
       <td className="px-1 py-1">
         <input

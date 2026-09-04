@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiError } from '@/lib/api';
 import { formatDate, formatMoney } from '@/lib/format';
 import { useClients } from '@/features/clients/api';
@@ -13,6 +13,9 @@ import { FileDrop } from '@/components/FileDrop';
 import { StatementSummary } from '@/features/statements/StatementSummary';
 import { TransactionsTable } from '@/features/statements/TransactionsTable';
 import { SaldoReconciliacao } from '@/features/statements/SaldoReconciliacao';
+import { PuxarClassificacaoForm } from './PuxarClassificacaoForm';
+
+type Origem = 'novo' | 'classificacao';
 
 /** "1.234,56" → 1234.56 ; "" → 0 */
 function parseMoney(s: string): number {
@@ -26,6 +29,9 @@ function moneyToInput(v: string | number | null | undefined): string {
 
 export function ImportPage() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const puxarId = params.get('puxar') ?? undefined;
+  const [origem, setOrigem] = useState<Origem>(puxarId ? 'classificacao' : 'novo');
   const { data: clients, isLoading: loadingClients } = useClients({ ativo: 'true' });
   const createMut = useCreateStatement();
 
@@ -174,120 +180,145 @@ export function ImportPage() {
     <section className="max-w-2xl space-y-4">
       <h1 className="text-xl font-semibold text-slate-800">Nova importação</h1>
 
-      <form onSubmit={submit} className="card space-y-4 p-6">
-        <div>
-          <label className="label">Cliente</label>
-          <select
-            className="input"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            disabled={loadingClients}
-            required
-          >
-            <option value="">{loadingClients ? 'Carregando…' : 'Selecione…'}</option>
-            {clients?.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.razao_social} — Domínio {c.dominio_code}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div>
-            <label className="label">Conta contábil do banco</label>
-            <input
-              className="input"
-              value={contaBanco}
-              onChange={(e) => setContaBanco(e.target.value)}
-              placeholder="ex: 10002"
-              required
-            />
-          </div>
-          <div>
-            <label className="label">Número do lote (Domínio)</label>
-            <input
-              className="input"
-              type="number"
-              min={0}
-              value={lote}
-              onChange={(e) => setLote(Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <label className="label">Cód. histórico entrada</label>
-            <input
-              className="input"
-              value={histEntrada}
-              onChange={(e) => setHistEntrada(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="label">Cód. histórico saída</label>
-            <input
-              className="input"
-              value={histSaida}
-              onChange={(e) => setHistSaida(e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="label">Saldo inicial da conta bancária</label>
-          <input
-            className="input"
-            inputMode="decimal"
-            value={saldoInicial}
-            onChange={(e) => {
-              setSaldoInicial(e.target.value);
-              saldoTocado.current = true;
-            }}
-            placeholder="0,00"
-          />
-          {selected && extratoAnterior ? (
-            <p className="mt-1 text-xs text-slate-400">
-              Continua do extrato anterior deste cliente
-              {extratoAnterior.period_end ? ` (até ${formatDate(extratoAnterior.period_end)})` : ''} —
-              saldo final {formatMoney(Math.round(Number(extratoAnterior.saldo_final) * 100))}. Ajuste
-              se precisar.
-            </p>
-          ) : (
-            <p className="mt-1 text-xs text-slate-400">
-              {selected
-                ? 'Primeiro extrato deste cliente — usando o saldo inicial do cadastro.'
-                : 'Vem do último extrato do cliente (ou do cadastro, no primeiro). Serve para conferir o saldo do fim do mês.'}
-            </p>
-          )}
-        </div>
-
-        <div>
-          <label className="label">Extrato bancário</label>
-          <FileDrop file={file} onFile={setFile} />
-        </div>
-
-        {isPdf && (
-          <div>
-            <label className="label">Senha do PDF (se tiver)</label>
-            <input
-              className="input"
-              type="password"
-              value={pdfPassword}
-              onChange={(e) => setPdfPassword(e.target.value)}
-              placeholder="deixe em branco se o PDF não tem senha"
-            />
-          </div>
-        )}
-
-        {errMsg && (
-          <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{errMsg}</p>
-        )}
-
-        <button type="submit" className="btn-primary w-full" disabled={!canSubmit}>
-          {createMut.isPending ? 'Lendo o extrato…' : 'Ler extrato'}
+      <div className="flex gap-1 text-sm">
+        <button
+          className={`rounded-md px-3 py-1.5 font-medium ${
+            origem === 'novo' ? 'bg-brand-600 text-white' : 'border border-slate-300 bg-white text-slate-600'
+          }`}
+          onClick={() => setOrigem('novo')}
+        >
+          Importar extrato do zero
         </button>
-      </form>
+        <button
+          className={`rounded-md px-3 py-1.5 font-medium ${
+            origem === 'classificacao'
+              ? 'bg-brand-600 text-white'
+              : 'border border-slate-300 bg-white text-slate-600'
+          }`}
+          onClick={() => setOrigem('classificacao')}
+        >
+          Puxar do módulo Classificação
+        </button>
+      </div>
 
-      {selected && (
+      {origem === 'classificacao' ? (
+        <PuxarClassificacaoForm initialStatementId={puxarId} />
+      ) : (
+        <form onSubmit={submit} className="card space-y-4 p-6">
+          <div>
+            <label className="label">Cliente</label>
+            <select
+              className="input"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              disabled={loadingClients}
+              required
+            >
+              <option value="">{loadingClients ? 'Carregando…' : 'Selecione…'}</option>
+              {clients?.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.razao_social} — Domínio {c.dominio_code}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="label">Conta contábil do banco</label>
+              <input
+                className="input"
+                value={contaBanco}
+                onChange={(e) => setContaBanco(e.target.value)}
+                placeholder="ex: 10002"
+                required
+              />
+            </div>
+            <div>
+              <label className="label">Número do lote (Domínio)</label>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={lote}
+                onChange={(e) => setLote(Number(e.target.value))}
+              />
+            </div>
+            <div>
+              <label className="label">Cód. histórico entrada</label>
+              <input
+                className="input"
+                value={histEntrada}
+                onChange={(e) => setHistEntrada(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label">Cód. histórico saída</label>
+              <input
+                className="input"
+                value={histSaida}
+                onChange={(e) => setHistSaida(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="label">Saldo inicial da conta bancária</label>
+            <input
+              className="input"
+              inputMode="decimal"
+              value={saldoInicial}
+              onChange={(e) => {
+                setSaldoInicial(e.target.value);
+                saldoTocado.current = true;
+              }}
+              placeholder="0,00"
+            />
+            {selected && extratoAnterior ? (
+              <p className="mt-1 text-xs text-slate-400">
+                Continua do extrato anterior deste cliente
+                {extratoAnterior.period_end ? ` (até ${formatDate(extratoAnterior.period_end)})` : ''} —
+                saldo final {formatMoney(Math.round(Number(extratoAnterior.saldo_final) * 100))}. Ajuste
+                se precisar.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-slate-400">
+                {selected
+                  ? 'Primeiro extrato deste cliente — usando o saldo inicial do cadastro.'
+                  : 'Vem do último extrato do cliente (ou do cadastro, no primeiro). Serve para conferir o saldo do fim do mês.'}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="label">Extrato bancário</label>
+            <FileDrop file={file} onFile={setFile} />
+          </div>
+
+          {isPdf && (
+            <div>
+              <label className="label">Senha do PDF (se tiver)</label>
+              <input
+                className="input"
+                type="password"
+                value={pdfPassword}
+                onChange={(e) => setPdfPassword(e.target.value)}
+                placeholder="deixe em branco se o PDF não tem senha"
+              />
+            </div>
+          )}
+
+          {errMsg && (
+            <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{errMsg}</p>
+          )}
+
+          <button type="submit" className="btn-primary w-full" disabled={!canSubmit}>
+            {createMut.isPending ? 'Lendo o extrato…' : 'Ler extrato'}
+          </button>
+        </form>
+      )}
+
+      {origem === 'novo' && selected && (
         <p className="text-xs text-slate-400">
           Entradas serão lançadas a débito da conta {contaBanco || '—'} e crédito da conta que
           você classificar; saídas o contrário. Você ajusta tudo na próxima tela.{' '}

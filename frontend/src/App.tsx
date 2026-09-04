@@ -8,6 +8,10 @@ import { ImportPage } from '@/features/import/ImportPage';
 import { RevisaoPage } from '@/features/revisao/RevisaoPage';
 import { HistoricoPage } from '@/features/historico/HistoricoPage';
 import { MemoriaPage } from '@/features/rules/MemoriaPage';
+import { ClassificarPage } from '@/features/classificacao/ClassificarPage';
+import { ClassificacaoRevisaoPage } from '@/features/classificacao/ClassificacaoRevisaoPage';
+import { ClassificacaoHistoricoPage } from '@/features/classificacao/ClassificacaoHistoricoPage';
+import { CategoriasPage } from '@/features/classificacao/CategoriasPage';
 
 export function App() {
   return (
@@ -26,6 +30,10 @@ export function App() {
         <Route path="/importar" element={<ImportPage />} />
         <Route path="/revisao/:id" element={<RevisaoPage />} />
         <Route path="/historico" element={<HistoricoPage />} />
+        <Route path="/classificacao" element={<ClassificarPage />} />
+        <Route path="/classificacao/revisao/:id" element={<ClassificacaoRevisaoPage />} />
+        <Route path="/classificacao/historico" element={<ClassificacaoHistoricoPage />} />
+        <Route path="/classificacao/categorias" element={<CategoriasPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

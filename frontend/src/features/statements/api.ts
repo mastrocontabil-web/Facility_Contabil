@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiDownload, saveBlob } from '@/lib/api';
-import type { Statement, Transaction } from '@/lib/types';
+import type { ComplementoModo, OrigemModulo, Statement, StatementStatus, Transaction } from '@/lib/types';
 
 export type StatementDetail = { statement: Statement; transactions: Transaction[] };
 export type ImportResult = StatementDetail & { warnings: string[] };
@@ -17,12 +17,13 @@ export type CreateStatementInput = {
 };
 
 export function useStatements(
-  filter: { client_id?: string; status?: string } = {},
+  filter: { client_id?: string; status?: string; origem_modulo?: OrigemModulo } = {},
   opts: { enabled?: boolean } = {},
 ) {
   const params = new URLSearchParams();
   if (filter.client_id) params.set('client_id', filter.client_id);
   if (filter.status) params.set('status', filter.status);
+  if (filter.origem_modulo) params.set('origem_modulo', filter.origem_modulo);
   const qs = params.toString();
   return useQuery({
     queryKey: ['statements', filter],
@@ -155,7 +156,8 @@ export function useUpdateStatementHeader(statementId: string) {
       hist_code_saida?: string;
       lote_numero?: number;
       saldo_inicial?: string;
-      complemento_modo?: 'extrato' | 'complemento' | 'ambos';
+      complemento_modo?: ComplementoModo;
+      status?: Extract<StatementStatus, 'classificacao' | 'revisao' | 'gerado'>;
     }) =>
       api<{ statement: Statement }>(`/api/statements/${statementId}`, {
         method: 'PATCH',

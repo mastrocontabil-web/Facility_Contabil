@@ -12,6 +12,7 @@ import {
 } from '@/features/statements/api';
 import { SaldoReconciliacao } from '@/features/statements/SaldoReconciliacao';
 import { ReimportarExtrato } from '@/features/statements/ReimportarExtrato';
+import { useClassificacoes } from '@/features/classificacao/api';
 import { BulkBar } from './BulkBar';
 import { TransactionRow } from './TransactionRow';
 import { useRevisaoDraft } from './useRevisaoDraft';
@@ -30,6 +31,17 @@ export function RevisaoPage() {
 
   const transactions = useMemo(() => data?.transactions ?? [], [data]);
   const { get, patchRow, patchMany, reset, changes, isDirty } = useRevisaoDraft(transactions);
+
+  // extratos que vieram do módulo Classificação trazem a categoria de cada
+  // lançamento — mostra o nome como contexto pra escolher a conta contábil.
+  const clientId = data?.statement.client_id;
+  const { data: entradasClassif } = useClassificacoes(clientId, 'entrada');
+  const { data: saidasClassif } = useClassificacoes(clientId, 'saida');
+  const classificacaoPorId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of [...(entradasClassif ?? []), ...(saidasClassif ?? [])]) m.set(c.id, c.nome);
+    return m;
+  }, [entradasClassif, saidasClassif]);
 
   // avisa antes de fechar a aba/atualizar com alterações não salvas
   useEffect(() => {
@@ -222,6 +234,7 @@ export function RevisaoPage() {
               <th className="px-2 py-2">Histórico do extrato</th>
               <th className="px-2 py-2 text-right">Valor</th>
               <th className="px-2 py-2">Tipo</th>
+              <th className="px-2 py-2">Classificação</th>
               <th className="px-2 py-2">Conta contábil</th>
               <th className="px-2 py-2">Cód. hist.</th>
               <th className="px-2 py-2">Complemento</th>
@@ -237,6 +250,7 @@ export function RevisaoPage() {
                 draft={get(txn.id)}
                 onPatch={(p) => patchRow(txn.id, p)}
                 complementoModo={complementoModo}
+                classificacaoNome={txn.classificacao_id ? classificacaoPorId.get(txn.classificacao_id) : null}
               />
             ))}
           </tbody>
@@ -350,6 +364,17 @@ function HeaderForm({
   const [he, setHe] = useState(st.hist_code_entrada);
   const [hs, setHs] = useState(st.hist_code_saida);
   const [lote, setLote] = useState(st.lote_numero);
+
+  // useState só pega o valor inicial no primeiro mount — se o cabeçalho ainda
+  // não tinha conta/histórico quando a página abriu (ex: acabou de ser puxado
+  // do módulo Classificação, com o fetch antigo em cache) e o refetch chega
+  // um instante depois, resincroniza os campos com o valor que veio do servidor.
+  useEffect(() => {
+    setBanco(st.banco_conta_contabil);
+    setHe(st.hist_code_entrada);
+    setHs(st.hist_code_saida);
+    setLote(st.lote_numero);
+  }, [st.banco_conta_contabil, st.hist_code_entrada, st.hist_code_saida, st.lote_numero]);
 
   const dirty =
     banco !== st.banco_conta_contabil ||

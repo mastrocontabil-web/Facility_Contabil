@@ -9,7 +9,7 @@ import { useDeleteStatement, useDeleteStatements, useStatements } from '@/featur
 import { BaixarDominio } from '@/features/statements/BaixarDominio';
 import { ReimportarExtrato } from '@/features/statements/ReimportarExtrato';
 
-const STATUS_LABEL: Record<StatementStatus, { text: string; cls: string }> = {
+const STATUS_LABEL: Partial<Record<StatementStatus, { text: string; cls: string }>> = {
   parsing: { text: 'lendo', cls: 'bg-slate-100 text-slate-600' },
   revisao: { text: 'em revisão', cls: 'bg-amber-100 text-amber-800' },
   gerado: { text: 'arquivo gerado', cls: 'bg-green-100 text-green-700' },
@@ -31,8 +31,12 @@ export function HistoricoPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmBulk, setConfirmBulk] = useState(false);
 
-  // se o filtro muda e alguma seleção não existe mais na lista, tira ela
-  const shown = useMemo(() => statements ?? [], [statements]);
+  // extratos ainda presos no módulo Classificação (não puxados) ficam só no
+  // histórico de lá; se o filtro muda e a seleção não existe mais, tira ela.
+  const shown = useMemo(
+    () => (statements ?? []).filter((s) => s.status !== 'classificacao'),
+    [statements],
+  );
   const shownIds = useMemo(() => new Set(shown.map((s) => s.id)), [shown]);
   const selecionadosNaLista = [...selected].filter((id) => shownIds.has(id));
   const todosSelecionados = shown.length > 0 && selecionadosNaLista.length === shown.length;
@@ -134,7 +138,7 @@ export function HistoricoPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {shown.map((s: Statement) => {
-                const st = STATUS_LABEL[s.status];
+                const st = STATUS_LABEL[s.status] ?? { text: s.status, cls: 'bg-slate-100 text-slate-600' };
                 const totais = 'qtd' in s.totais ? s.totais : null;
                 return (
                   <tr key={s.id} className={selected.has(s.id) ? 'bg-brand-50/40' : ''}>

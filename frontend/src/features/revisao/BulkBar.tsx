@@ -1,12 +1,14 @@
 import { useState } from 'react';
+import type { ComplementoModo } from '@/lib/types';
 
 type Dir = 'entrada' | 'saida';
-export type ComplementoModo = 'extrato' | 'complemento' | 'ambos';
 
 const MODO_LABEL: Record<ComplementoModo, string> = {
   ambos: 'Histórico do extrato + complemento',
   extrato: 'Somente o histórico do extrato',
   complemento: 'Somente o complemento',
+  extrato_classificacao: 'Histórico do extrato + classificação',
+  tudo: 'Histórico do extrato + complemento + classificação',
 };
 
 export function BulkBar({
@@ -84,7 +86,7 @@ export function BulkBar({
       <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 text-sm">
         <span className="text-xs text-slate-500">Complemento no arquivo:</span>
         <select
-          className="input h-9 w-72"
+          className="input h-9 w-96"
           value={complementoModo}
           disabled={savingModo}
           onChange={(e) => onComplementoModo(e.target.value as ComplementoModo)}
