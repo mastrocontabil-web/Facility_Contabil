@@ -67,7 +67,7 @@ export function ClientsPage() {
         </select>
       </div>
 
-      <div className="card overflow-hidden">
+      <div className="card overflow-x-auto">
         {isLoading ? (
           <p className="p-6 text-sm text-slate-400">Carregando…</p>
         ) : error ? (

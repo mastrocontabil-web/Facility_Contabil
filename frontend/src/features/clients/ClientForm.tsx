@@ -79,7 +79,7 @@ export function ClientForm({
         {errors.razao_social && <p className="mt-1 text-xs text-red-600">obrigatório</p>}
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="label">CNPJ / CPF</label>
           <input
@@ -102,7 +102,7 @@ export function ClientForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="label">Conta contábil do banco (padrão)</label>
           <input
@@ -125,7 +125,7 @@ export function ClientForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div>
           <label className="label">Cód. histórico entrada</label>
           <input className="input" inputMode="numeric" {...register('hist_code_entrada')} />

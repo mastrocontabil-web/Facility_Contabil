@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ApiError } from '@/lib/api';
 import { formatDate } from '@/lib/format';
 import type { Transaction } from '@/lib/types';
@@ -19,14 +20,27 @@ type Filter = 'todas' | 'entrada' | 'saida' | 'pendentes' | 'conferir' | 'inativ
 
 export function RevisaoPage() {
   const { id = '' } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { data, isLoading, error } = useStatement(id);
   const save = useSaveTransactions(id);
   const header = useUpdateStatementHeader(id);
   const gerar = useGenerateDominio(id);
   const [filter, setFilter] = useState<Filter>('saida');
+  const [confirmSair, setConfirmSair] = useState(false);
 
   const transactions = useMemo(() => data?.transactions ?? [], [data]);
   const { get, patchRow, patchMany, reset, changes, isDirty } = useRevisaoDraft(transactions);
+
+  // avisa antes de fechar a aba/atualizar com alterações não salvas
+  useEffect(() => {
+    if (!isDirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isDirty]);
 
   const stats = useMemo(() => {
     let pend = 0;
@@ -112,9 +126,12 @@ export function RevisaoPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/historico" className="btn-ghost">
+          <button
+            className="btn-ghost"
+            onClick={() => (isDirty ? setConfirmSair(true) : navigate('/historico'))}
+          >
             Voltar
-          </Link>
+          </button>
           <ReimportarExtrato statementId={id} qtd={transactions.length} as="button" />
           <button className="btn-primary" onClick={onSave} disabled={!isDirty || save.isPending}>
             {save.isPending ? 'Salvando…' : isDirty ? `Salvar (${changes.length})` : 'Salvo'}
@@ -274,6 +291,15 @@ export function RevisaoPage() {
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmSair}
+        title="Sair sem salvar?"
+        message={`Você tem ${changes.length} alteração(ões) não salva(s). Se sair agora, elas se perdem.`}
+        confirmLabel="Sair sem salvar"
+        onConfirm={() => navigate('/historico')}
+        onCancel={() => setConfirmSair(false)}
+      />
     </section>
   );
 }
