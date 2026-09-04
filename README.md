@@ -177,7 +177,28 @@ caminho não existe (não quebra em outra máquina).
 
 ## Uso no dia a dia
 
-`iniciar.bat` sobe os 3 serviços com um clique. Pra rodar em outra máquina,
-`empacotar.ps1` gera um `.zip` (com os `.env`, sem `node_modules`/`.venv`) e
-`configurar.bat` instala tudo na máquina nova — ver os comentários de cada
-script.
+`iniciar.bat` sobe os 3 serviços com um clique e abre o navegador sozinho.
+
+## Rodar em outra máquina
+
+Leva o sistema (com os `.env` já preenchidos) pra outro computador sem repetir
+o setup do Supabase do zero — só funciona pro **mesmo projeto Supabase**
+(as chaves nos `.env` viajam junto com o `.zip`).
+
+**Na máquina atual:**
+
+1. `powershell -ExecutionPolicy Bypass -File empacotar.ps1` — gera
+   `extrato-dominio.zip` na Área de trabalho, com o código e os `.env` (sem
+   `node_modules`/`.venv`/`.git`/`dist`).
+
+**Na máquina nova** (precisa ter **Node.js 20+** e **Python 3.12+** instalados):
+
+2. Descompacta o `.zip` em qualquer pasta.
+3. Roda `configurar.bat` (clique duplo) — instala as dependências do npm e
+   cria o ambiente Python do parser. Só precisa rodar **uma vez**.
+4. Roda `iniciar.bat` sempre que for usar — sobe os 3 serviços e abre
+   `http://localhost:5173` sozinho.
+
+Se faltar algum `.env` (não veio no `.zip`, ou é uma instalação nova sem
+Supabase configurado ainda), `configurar.bat` avisa quais faltam — copie de
+`.env.example` e siga o [Setup](#setup) acima.
