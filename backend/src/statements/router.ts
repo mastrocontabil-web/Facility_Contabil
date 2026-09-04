@@ -80,6 +80,91 @@ function buildTotais(txns: ParseResult['transactions']) {
   };
 }
 
+/**
+ * Classifica os lançamentos lidos (memória do cliente), grava na `transactions`
+ * e finaliza o `statement` (período, totais, saldo_final, status=revisao).
+ * Usado tanto pela importação nova quanto pela reimportação.
+ */
+async function gravarLancamentos(
+  supabase: SupabaseClient,
+  p: {
+    ownerId: string;
+    statementId: string;
+    clientId: string;
+    histEntrada: string;
+    histSaida: string;
+    saldoInicial: number;
+    parsed: ParseResult;
+    arquivoNome: string;
+    formato: string;
+    storagePath: string | null;
+  },
+) {
+  const { data: rulesRaw } = await supabase
+    .from('mapping_rules')
+    .select(
+      'id, direction, match_type, pattern, conta_contabil, hist_code, hist_complemento_template, prioridade, hits, last_used_at',
+    )
+    .eq('client_id', p.clientId)
+    .eq('ativo', true);
+  const rules = (rulesRaw ?? []) as Rule[];
+
+  const rows = p.parsed.transactions.map((t, i) => {
+    const m = classify(rules, { direction: t.direction, description: t.description });
+    const histPadrao = t.direction === 'entrada' ? p.histEntrada : p.histSaida;
+    return {
+      owner_id: p.ownerId,
+      statement_id: p.statementId,
+      ordem: i,
+      data: t.date,
+      descricao_raw: t.description,
+      valor: (t.amount_cents / 100).toFixed(2),
+      direction: t.direction,
+      conta_contabil: m?.rule.conta_contabil ?? null,
+      hist_code: m?.rule.hist_code ?? histPadrao,
+      hist_complemento: m?.rule.hist_complemento_template ?? '',
+      cod_complemento_hist: '0',
+      regra_id: m?.rule.id ?? null,
+      origem_preenchimento: m?.origem ?? 'vazio',
+      raw: t.raw ?? {},
+    };
+  });
+  const { error: tErr } = await supabase.from('transactions').insert(rows);
+  if (tErr) throw mapPgrstError(tErr, 'gravar lançamentos');
+
+  const totais = buildTotais(p.parsed.transactions);
+  const saldoFinal =
+    (Math.round(p.saldoInicial * 100) + totais.entradas.valor_cents - totais.saidas.valor_cents) /
+    100;
+  const { data: statement, error: uErr } = await supabase
+    .from('statements')
+    .update({
+      status: 'revisao',
+      erro_msg: null,
+      arquivo_nome: p.arquivoNome,
+      formato: p.formato,
+      storage_path: p.storagePath,
+      period_start: p.parsed.period_start,
+      period_end: p.parsed.period_end,
+      banco_id: p.parsed.bank_id,
+      conta_ofx: p.parsed.account_id,
+      totais,
+      saldo_final: saldoFinal,
+    })
+    .eq('id', p.statementId)
+    .select(STMT_COLS)
+    .single();
+  if (uErr) throw mapPgrstError(uErr, 'finalizar importação');
+
+  const { data: transactions } = await supabase
+    .from('transactions')
+    .select(TXN_COLS)
+    .eq('statement_id', p.statementId)
+    .order('ordem');
+
+  return { statement, transactions: transactions ?? [] };
+}
+
 // --------------------------------------------------------------------------- #
 // POST /  — upload + parse
 // --------------------------------------------------------------------------- #
@@ -176,71 +261,98 @@ statementsRouter.post('/', upload.single('file'), async (req, res, next) => {
       return;
     }
 
-    // memória de classificação do cliente
-    const { data: rulesRaw } = await supabase
-      .from('mapping_rules')
-      .select(
-        'id, direction, match_type, pattern, conta_contabil, hist_code, hist_complemento_template, prioridade, hits, last_used_at',
-      )
-      .eq('client_id', dto.client_id)
-      .eq('ativo', true);
-    const rules = (rulesRaw ?? []) as Rule[];
-
-    // transações -> linhas
-    const rows = parsed.transactions.map((t, i) => {
-      const m = classify(rules, { direction: t.direction, description: t.description });
-      const histPadrao = t.direction === 'entrada' ? dto.hist_code_entrada : dto.hist_code_saida;
-      return {
-        owner_id: userId,
-        statement_id: statementId,
-        ordem: i,
-        data: t.date,
-        descricao_raw: t.description,
-        valor: (t.amount_cents / 100).toFixed(2),
-        direction: t.direction,
-        conta_contabil: m?.rule.conta_contabil ?? null,
-        hist_code: m?.rule.hist_code ?? histPadrao,
-        hist_complemento: m?.rule.hist_complemento_template ?? '', // texto livre; começa vazio
-        cod_complemento_hist: '0',
-        regra_id: m?.rule.id ?? null,
-        origem_preenchimento: m?.origem ?? 'vazio',
-        raw: t.raw ?? {},
-      };
+    const { statement, transactions } = await gravarLancamentos(supabase, {
+      ownerId: userId,
+      statementId,
+      clientId: dto.client_id,
+      histEntrada: dto.hist_code_entrada,
+      histSaida: dto.hist_code_saida,
+      saldoInicial,
+      parsed,
+      arquivoNome: req.file.originalname,
+      formato,
+      storagePath: upErr ? null : path,
     });
-    const { error: tErr } = await supabase.from('transactions').insert(rows);
-    if (tErr) throw mapPgrstError(tErr, 'gravar lançamentos');
 
-    const totais = buildTotais(parsed.transactions);
-    const saldoFinal =
-      (Math.round(saldoInicial * 100) + totais.entradas.valor_cents - totais.saidas.valor_cents) /
-      100;
-    const { data: updated, error: uErr } = await supabase
+    res.status(201).json({ statement, transactions, warnings: parsed.warnings });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// POST /:id/reimport  — troca o arquivo de uma importação, mantém o resto
+// --------------------------------------------------------------------------- #
+statementsRouter.post('/:id/reimport', upload.single('file'), async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+  const statementId = req.params.id as string;
+
+  try {
+    if (!req.file) throw badRequest('Arquivo do extrato é obrigatório (campo "file")');
+
+    const formato = detectFormat(req.file.originalname);
+    if (!formato) {
+      throw badRequest('Formato não reconhecido — use PDF, OFX, CSV, XLS ou XLSX');
+    }
+
+    const { data: stmt, error: sErr } = await supabase
       .from('statements')
-      .update({
-        status: 'revisao',
-        period_start: parsed.period_start,
-        period_end: parsed.period_end,
-        banco_id: parsed.bank_id,
-        conta_ofx: parsed.account_id,
-        totais,
-        saldo_final: saldoFinal,
-      })
+      .select('id, client_id, hist_code_entrada, hist_code_saida, saldo_inicial')
       .eq('id', statementId)
-      .select(STMT_COLS)
-      .single();
-    if (uErr) throw mapPgrstError(uErr, 'finalizar importação');
+      .maybeSingle();
+    if (sErr) throw mapPgrstError(sErr, 'buscar importação');
+    if (!stmt) throw notFound('Importação não encontrada');
 
-    const { data: txns } = await supabase
+    const path = `${userId}/${statementId}/${sanitizeName(req.file.originalname)}`;
+    const { error: upErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
+    if (upErr) logger.warn({ upErr }, 'falha ao subir arquivo no storage (segue mesmo assim)');
+
+    let parsed: ParseResult | null = null;
+    let parseErr: unknown = null;
+    try {
+      parsed = await callParser(
+        { buffer: req.file.buffer, originalname: req.file.originalname, mimetype: req.file.mimetype },
+        { pdfPassword: typeof req.body?.pdf_password === 'string' ? req.body.pdf_password : undefined },
+      );
+    } catch (e) {
+      parseErr = e;
+    }
+
+    if (parseErr || !parsed || parsed.transactions.length === 0) {
+      const msg = parseErr
+        ? parseErr instanceof Error
+          ? parseErr.message
+          : 'falha ao ler o extrato'
+        : (parsed?.warnings[0] ?? 'Nenhum lançamento encontrado no extrato');
+      await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
+      next(parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] }));
+      return;
+    }
+
+    // fora com os lançamentos antigos
+    const { error: dErr } = await supabase
       .from('transactions')
-      .select(TXN_COLS)
-      .eq('statement_id', statementId)
-      .order('ordem');
+      .delete()
+      .eq('statement_id', statementId);
+    if (dErr) throw mapPgrstError(dErr, 'limpar lançamentos antigos');
 
-    res.status(201).json({
-      statement: updated,
-      transactions: txns ?? [],
-      warnings: parsed.warnings,
+    const { statement, transactions } = await gravarLancamentos(supabase, {
+      ownerId: userId,
+      statementId,
+      clientId: stmt.client_id,
+      histEntrada: stmt.hist_code_entrada,
+      histSaida: stmt.hist_code_saida,
+      saldoInicial: Number(stmt.saldo_inicial ?? 0),
+      parsed,
+      arquivoNome: req.file.originalname,
+      formato,
+      storagePath: upErr ? null : path,
     });
+
+    res.json({ statement, transactions, warnings: parsed.warnings });
   } catch (err) {
     next(err);
   }

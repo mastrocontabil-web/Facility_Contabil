@@ -289,6 +289,71 @@ describe('POST /statements', () => {
   });
 });
 
+describe('POST /statements/:id/reimport', () => {
+  it('troca os lançamentos, mantém cliente/hist/saldo, volta pra revisão', async () => {
+    mockedParser.mockResolvedValue(parseResult);
+    const { app, ops } = appWith(
+      handlerFor({
+        'statements.select': () => ({
+          id: 's1',
+          client_id: 'c1',
+          hist_code_entrada: '138',
+          hist_code_saida: '186',
+          saldo_inicial: '500.00',
+        }),
+        'statements.update': (op) => ({ id: 's1', ...(op.payload as Record<string, unknown>) }),
+        'transactions.delete': () => null,
+        'transactions.insert': () => null,
+        'transactions.select': () => [{ id: 't1', ordem: 0, direction: 'saida' }],
+        'mapping_rules.select': () => [],
+      }),
+    );
+
+    const res = await request(app)
+      .post('/statements/s1/reimport')
+      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'novo.ofx');
+
+    expect(res.status).toBe(200);
+    expect(res.body.statement.status).toBe('revisao');
+    expect(res.body.statement.arquivo_nome).toBe('novo.ofx');
+    // apagou os antigos antes de inserir
+    const del = ops.findIndex((o) => o.table === 'transactions' && o.verb === 'delete');
+    const ins = ops.findIndex((o) => o.table === 'transactions' && o.verb === 'insert');
+    expect(del).toBeGreaterThanOrEqual(0);
+    expect(del).toBeLessThan(ins);
+  });
+
+  it('404 se a importação não existe', async () => {
+    mockedParser.mockResolvedValue(parseResult);
+    const { app } = appWith(handlerFor({ 'statements.select': () => null }));
+    const res = await request(app)
+      .post('/statements/nope/reimport')
+      .attach('file', Buffer.from('x'), 'e.ofx');
+    expect(res.status).toBe(404);
+  });
+
+  it('erro do parser marca status erro e NÃO apaga os lançamentos', async () => {
+    mockedParser.mockRejectedValueOnce(unprocessable('PDF protegido por senha.'));
+    const { app, ops } = appWith(
+      handlerFor({
+        'statements.select': () => ({
+          id: 's1',
+          client_id: 'c1',
+          hist_code_entrada: '138',
+          hist_code_saida: '186',
+          saldo_inicial: '0',
+        }),
+        'statements.update': () => ({ id: 's1', status: 'erro' }),
+      }),
+    );
+    const res = await request(app)
+      .post('/statements/s1/reimport')
+      .attach('file', Buffer.from('%PDF'), 'e.pdf');
+    expect(res.status).toBe(422);
+    expect(ops.some((o) => o.table === 'transactions' && o.verb === 'delete')).toBe(false);
+  });
+});
+
 describe('GET /statements', () => {
   it('lista', async () => {
     const { app } = appWith(handlerFor({ 'statements.select': () => [{ id: 's1' }] }));

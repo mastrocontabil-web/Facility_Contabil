@@ -6,6 +6,7 @@ import { formatDate } from '@/lib/format';
 import type { Statement, StatementStatus } from '@/lib/types';
 import { useDeleteStatement, useStatements } from '@/features/statements/api';
 import { BaixarDominio } from '@/features/statements/BaixarDominio';
+import { ReimportarExtrato } from '@/features/statements/ReimportarExtrato';
 
 const STATUS_LABEL: Record<StatementStatus, { text: string; cls: string }> = {
   parsing: { text: 'lendo', cls: 'bg-slate-100 text-slate-600' },
@@ -80,6 +81,12 @@ export function HistoricoPage() {
                         <>
                           <span className="mx-2 text-slate-300">·</span>
                           <BaixarDominio statementId={s.id} />
+                        </>
+                      )}
+                      {s.status !== 'parsing' && (
+                        <>
+                          <span className="mx-2 text-slate-300">·</span>
+                          <ReimportarExtrato statementId={s.id} qtd={totais?.qtd ?? 0} />
                         </>
                       )}
                       <button

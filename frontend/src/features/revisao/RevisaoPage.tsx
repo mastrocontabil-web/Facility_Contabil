@@ -10,6 +10,7 @@ import {
   useUpdateStatementHeader,
 } from '@/features/statements/api';
 import { SaldoReconciliacao } from '@/features/statements/SaldoReconciliacao';
+import { ReimportarExtrato } from '@/features/statements/ReimportarExtrato';
 import { BulkBar } from './BulkBar';
 import { TransactionRow } from './TransactionRow';
 import { useRevisaoDraft } from './useRevisaoDraft';
@@ -110,10 +111,11 @@ export function RevisaoPage() {
               : 'sem período'}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
           <Link to="/historico" className="btn-ghost">
             Voltar
           </Link>
+          <ReimportarExtrato statementId={id} qtd={transactions.length} as="button" />
           <button className="btn-primary" onClick={onSave} disabled={!isDirty || save.isPending}>
             {save.isPending ? 'Salvando…' : isDirty ? `Salvar (${changes.length})` : 'Salvo'}
           </button>

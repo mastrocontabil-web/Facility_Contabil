@@ -67,6 +67,38 @@ export function useDeleteStatement() {
   });
 }
 
+export function useDeleteStatements() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: string[]) => {
+      for (const id of ids) await api(`/api/statements/${id}`, { method: 'DELETE' });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statements'] }),
+  });
+}
+
+export function useReimportStatement(statementId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { file: File; pdf_password?: string }) => {
+      const fd = new FormData();
+      fd.append('file', input.file);
+      if (input.pdf_password) fd.append('pdf_password', input.pdf_password);
+      return api<ImportResult>(`/api/statements/${statementId}/reimport`, {
+        method: 'POST',
+        body: fd,
+      });
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(['statements', 'one', statementId], {
+        statement: data.statement,
+        transactions: data.transactions,
+      });
+      qc.invalidateQueries({ queryKey: ['statements'] });
+    },
+  });
+}
+
 export type TransactionUpdate = {
   id: string;
   conta_contabil: string | null;
