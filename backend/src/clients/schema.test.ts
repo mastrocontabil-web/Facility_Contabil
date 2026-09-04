@@ -13,6 +13,16 @@ describe('money', () => {
   it('texto sem número vira 0', () => {
     expect(money.parse('abc')).toBe(0);
   });
+  it('só ponto com 3 dígitos depois é separador de milhar, não decimal', () => {
+    expect(money.parse('1.500')).toBe(1500);
+    expect(money.parse('100.000')).toBe(100000);
+    expect(money.parse('1.234.567')).toBe(1234567);
+  });
+  it('só ponto com 1-2 dígitos depois continua decimal', () => {
+    expect(money.parse('1500.5')).toBe(1500.5);
+    expect(money.parse('1500.50')).toBe(1500.5);
+    expect(money.parse('0.99')).toBe(0.99);
+  });
 });
 
 describe('clientCreateSchema', () => {

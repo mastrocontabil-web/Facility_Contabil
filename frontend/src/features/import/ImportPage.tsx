@@ -17,9 +17,20 @@ import { PuxarClassificacaoForm } from './PuxarClassificacaoForm';
 
 type Origem = 'novo' | 'classificacao';
 
-/** "1.234,56" → 1234.56 ; "" → 0 */
+/**
+ * "1.234,56" → 1234.56 ; "" → 0. Só ponto (sem vírgula) é ambíguo — "1.500"
+ * é separador de milhar (1500), mas "1500.5" é decimal — resolve pelo nº de
+ * dígitos depois do último ponto, igual ao `money` do backend.
+ */
 function parseMoney(s: string): number {
-  return Number(s.replace(/\./g, '').replace(',', '.')) || 0;
+  const v = s.trim();
+  if (v.includes(',')) return Number(v.replace(/\./g, '').replace(',', '.')) || 0;
+  const pontos = v.split('.').length - 1;
+  if (pontos > 0) {
+    const casasFinais = v.length - v.lastIndexOf('.') - 1;
+    if (pontos > 1 || casasFinais === 3) return Number(v.replace(/\./g, '')) || 0;
+  }
+  return Number(v) || 0;
 }
 
 /** 1234.56 → "1234,56" (pro campo de texto) */

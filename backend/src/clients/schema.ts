@@ -13,7 +13,15 @@ const histCode = z
   .trim()
   .regex(/^\d{1,6}$/, 'código de histórico deve ser numérico (até 6 dígitos)');
 
-/** Aceita "1.234,56", "1234.56", "-50", 1234.5 — devolve number com 2 casas. */
+/**
+ * Aceita "1.234,56", "1234.56", "-50", 1234.5 — devolve number com 2 casas.
+ *
+ * Só ponto (sem vírgula) é ambíguo: "1.500" pode ser 1500 (separador de
+ * milhar, como o usuário digita no cadastro) ou 1,5. Resolve pelo nº de
+ * dígitos depois do ÚLTIMO ponto — 3 dígitos (ou mais de um ponto) é sempre
+ * separador de milhar; 1-2 dígitos é decimal. Sem essa regra, "1.500" virava
+ * silenciosamente 1,50 e propagava saldo inicial errado pro cliente inteiro.
+ */
 export const money = z
   .union([z.string(), z.number()])
   .transform((v) => {
@@ -22,6 +30,11 @@ export const money = z
     if (!s) return 0;
     if (s.includes(',') && s.includes('.')) return Number(s.replace(/\./g, '').replace(',', '.'));
     if (s.includes(',')) return Number(s.replace(',', '.'));
+    const pontos = s.split('.').length - 1;
+    if (pontos > 0) {
+      const casasFinais = s.length - s.lastIndexOf('.') - 1;
+      if (pontos > 1 || casasFinais === 3) return Number(s.replace(/\./g, ''));
+    }
     return Number(s);
   })
   .refine((n) => Number.isFinite(n) && Math.abs(n) < 1e12, 'valor inválido')
