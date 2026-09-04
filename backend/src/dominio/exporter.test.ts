@@ -130,6 +130,21 @@ describe('buildDominioFile — formato (bate com export real do Domínio)', () =
     expect(linhasDe(r2)[2].slice(45, 557)).toBe('X'.repeat(512));
   });
 
+  it('complemento: modo "extrato_classificacao" junta extrato + classificação (ignora hist_complemento)', () => {
+    const r = buildDominioFile({
+      ...base,
+      complemento_modo: 'extrato_classificacao',
+      lancamentos: [
+        lanc({
+          descricao_raw: 'pix recebido',
+          hist_complemento: 'ignorado neste modo',
+          classificacao_nome: 'agua e esgoto',
+        }),
+      ],
+    });
+    expect(linhasDe(r)[2].slice(45, 557).trimEnd()).toBe('PIX RECEBIDO AGUA E ESGOTO');
+  });
+
   it('acento no complemento sobrevive em Latin-1', () => {
     const r = buildDominioFile({
       ...base,

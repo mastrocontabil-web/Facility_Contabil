@@ -23,9 +23,17 @@ export const createStatementSchema = z.object({
   pdf_password: z.string().max(200).optional(),
 });
 
+/** POST /api/statements/classificar — só o essencial; conta do banco e hist
+ *  ficam pra quando o extrato for "puxado" pro módulo Importação. */
+export const classificarStatementSchema = z.object({
+  client_id: z.string().uuid(),
+  pdf_password: z.string().max(200).optional(),
+});
+
 export const listStatementsQuerySchema = z.object({
   client_id: z.string().uuid().optional(),
-  status: z.enum(['parsing', 'revisao', 'gerado', 'erro']).optional(),
+  status: z.enum(['parsing', 'classificacao', 'revisao', 'gerado', 'erro']).optional(),
+  origem_modulo: z.enum(['importacao', 'classificacao']).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
@@ -35,8 +43,10 @@ export const updateStatementSchema = z.object({
   hist_code_saida: histCode.optional(),
   lote_numero: z.coerce.number().int().min(0).max(99_999_999).optional(),
   saldo_inicial: money.optional(),
-  complemento_modo: z.enum(['extrato', 'complemento', 'ambos']).optional(),
-  status: z.enum(['revisao', 'gerado']).optional(),
+  complemento_modo: z
+    .enum(['extrato', 'complemento', 'ambos', 'extrato_classificacao', 'tudo'])
+    .optional(),
+  status: z.enum(['classificacao', 'revisao', 'gerado']).optional(),
 });
 
 const contaOpt = z
@@ -71,6 +81,15 @@ export const transactionUpdateSchema = z.object({
 
 export const bulkUpdateTransactionsSchema = z.object({
   updates: z.array(transactionUpdateSchema).min(1).max(2000),
+});
+
+const classificacaoUpdateItemSchema = z.object({
+  id: z.string().uuid(),
+  classificacao_id: z.string().uuid().nullable(),
+});
+
+export const bulkUpdateClassificacaoSchema = z.object({
+  updates: z.array(classificacaoUpdateItemSchema).min(1).max(2000),
 });
 
 export type CreateStatement = z.infer<typeof createStatementSchema>;

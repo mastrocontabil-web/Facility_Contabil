@@ -17,4 +17,24 @@ describe('composeComplemento', () => {
     expect(composeComplemento('ambos', 'PIX RECEBIDO', '')).toBe('PIX RECEBIDO');
     expect(composeComplemento('ambos', '', 'só isso')).toBe('só isso');
   });
+  it('extrato_classificacao: extrato + classificação, sem o digitado', () => {
+    expect(composeComplemento('extrato_classificacao', 'PIX RECEBIDO', 'venda física', 'ÁGUA E ESGOTO')).toBe(
+      'PIX RECEBIDO ÁGUA E ESGOTO',
+    );
+  });
+  it('extrato_classificacao: some silenciosamente sem classificação', () => {
+    expect(composeComplemento('extrato_classificacao', 'PIX RECEBIDO', 'venda física')).toBe(
+      'PIX RECEBIDO',
+    );
+  });
+  it('tudo: extrato + digitado + classificação', () => {
+    expect(composeComplemento('tudo', 'PIX RECEBIDO', 'venda física', 'ÁGUA E ESGOTO')).toBe(
+      'PIX RECEBIDO venda física ÁGUA E ESGOTO',
+    );
+  });
+  it('tudo: ignora partes vazias', () => {
+    expect(composeComplemento('tudo', 'PIX RECEBIDO', '', 'ÁGUA E ESGOTO')).toBe(
+      'PIX RECEBIDO ÁGUA E ESGOTO',
+    );
+  });
 });

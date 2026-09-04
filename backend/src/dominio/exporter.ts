@@ -22,6 +22,7 @@ export type ExportLancamento = {
   hist_code: string;
   descricao_raw: string;
   hist_complemento: string;
+  classificacao_nome?: string;
 };
 
 export type ExportInput = {
@@ -151,10 +152,9 @@ export function buildDominioFile(input: ExportInput): ExportResult {
     const C = pad0(onlyDigits(t.conta_contabil), CONTA_LEN);
     const [deb, cred] = t.direction === 'entrada' ? [B, C] : [C, B];
     const compl = padR(
-      sanitize(composeComplemento(complemento_modo, t.descricao_raw, t.hist_complemento)).replace(
-        / +$/,
-        '',
-      ),
+      sanitize(
+        composeComplemento(complemento_modo, t.descricao_raw, t.hist_complemento, t.classificacao_nome),
+      ).replace(/ +$/, ''),
       COMPLEMENTO_LEN,
     );
     totalCents += Math.round(Math.abs(t.valor_cents));

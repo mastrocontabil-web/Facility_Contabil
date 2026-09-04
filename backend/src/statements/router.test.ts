@@ -289,6 +289,68 @@ describe('POST /statements', () => {
   });
 });
 
+describe('POST /statements/classificar', () => {
+  it('sobe o arquivo sem conta do banco, cria com origem_modulo=classificacao', async () => {
+    mockedParser.mockResolvedValue(parseResult);
+    const { app, ops } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1' }),
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': () => ({ id: 's1', status: 'classificacao', totais: {} }),
+        'transactions.insert': () => null,
+        'transactions.select': () => [
+          { id: 't1', ordem: 0, direction: 'saida' },
+          { id: 't2', ordem: 1, direction: 'entrada' },
+        ],
+      }),
+    );
+
+    const res = await request(app)
+      .post('/statements/classificar')
+      .field('client_id', '11111111-1111-1111-1111-111111111111')
+      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'extrato.ofx');
+
+    expect(res.status).toBe(201);
+    expect(res.body.statement.status).toBe('classificacao');
+
+    const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
+    expect(insert?.payload).toMatchObject({ origem_modulo: 'classificacao' });
+    expect(insert?.payload).not.toHaveProperty('banco_conta_contabil');
+  });
+
+  it('404 quando o cliente não é do usuário', async () => {
+    const { app } = appWith(handlerFor({ 'clients.select': () => null }));
+    const res = await request(app)
+      .post('/statements/classificar')
+      .field('client_id', '11111111-1111-1111-1111-111111111111')
+      .attach('file', Buffer.from('x'), 'e.ofx');
+    expect(res.status).toBe(404);
+  });
+
+  it('erro do parser marca o statement como erro e devolve 422', async () => {
+    mockedParser.mockRejectedValueOnce(unprocessable('PDF protegido por senha.'));
+    const updates: FakeOp[] = [];
+    const { app } = appWith((op) => {
+      if (op.table === 'statements' && op.verb === 'update') updates.push(op);
+      const data =
+        op.table === 'clients'
+          ? { id: 'c1' }
+          : op.table === 'statements' && op.verb === 'insert'
+            ? { id: 's1' }
+            : null;
+      return { data, error: null };
+    });
+
+    const res = await request(app)
+      .post('/statements/classificar')
+      .field('client_id', '11111111-1111-1111-1111-111111111111')
+      .attach('file', Buffer.from('%PDF'), 'e.pdf');
+
+    expect(res.status).toBe(422);
+    expect(updates.some((u) => (u.payload as { status?: string }).status === 'erro')).toBe(true);
+  });
+});
+
 describe('POST /statements/:id/reimport', () => {
   it('troca os lançamentos, mantém cliente/hist/saldo, volta pra revisão', async () => {
     mockedParser.mockResolvedValue(parseResult);
@@ -332,6 +394,34 @@ describe('POST /statements/:id/reimport', () => {
     expect(res.status).toBe(404);
   });
 
+  it('extrato ainda no módulo Classificação: reimportar mantém status classificacao', async () => {
+    mockedParser.mockResolvedValue(parseResult);
+    const { app } = appWith(
+      handlerFor({
+        'statements.select': () => ({
+          id: 's1',
+          client_id: 'c1',
+          hist_code_entrada: '138',
+          hist_code_saida: '186',
+          saldo_inicial: '0',
+          status: 'classificacao',
+        }),
+        'statements.update': (op) => ({ id: 's1', ...(op.payload as Record<string, unknown>) }),
+        'transactions.delete': () => null,
+        'transactions.insert': () => null,
+        'transactions.select': () => [{ id: 't1', ordem: 0, direction: 'saida' }],
+        'mapping_rules.select': () => [],
+      }),
+    );
+
+    const res = await request(app)
+      .post('/statements/s1/reimport')
+      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'novo.ofx');
+
+    expect(res.status).toBe(200);
+    expect(res.body.statement.status).toBe('classificacao');
+  });
+
   it('erro do parser marca status erro e NÃO apaga os lançamentos', async () => {
     mockedParser.mockRejectedValueOnce(unprocessable('PDF protegido por senha.'));
     const { app, ops } = appWith(
@@ -360,6 +450,14 @@ describe('GET /statements', () => {
     const res = await request(app).get('/statements');
     expect(res.status).toBe(200);
     expect(res.body.statements).toHaveLength(1);
+  });
+
+  it('filtra por origem_modulo', async () => {
+    const { app, ops } = appWith(handlerFor({ 'statements.select': () => [{ id: 's1' }] }));
+    const res = await request(app).get('/statements?origem_modulo=classificacao');
+    expect(res.status).toBe(200);
+    const sel = ops.find((o) => o.table === 'statements' && o.verb === 'select');
+    expect(sel?.filters).toContainEqual(['origem_modulo', 'classificacao']);
   });
 });
 
@@ -526,5 +624,66 @@ describe('PATCH /statements/:id/transactions', () => {
       .send({ updates: [{ id: '11111111-1111-1111-1111-111111111111', conta_contabil: '' }] });
     const sent = (rpcOps[0]?.args.p_updates as Array<{ conta_contabil: unknown }>)[0];
     expect(sent.conta_contabil).toBeNull();
+  });
+});
+
+describe('PATCH /statements/:id/classificacao', () => {
+  const U1 = '11111111-1111-1111-1111-111111111111';
+  const CL1 = '33333333-3333-3333-3333-333333333333';
+
+  function appWithRpc(rpcData: unknown, txns: unknown[]) {
+    const { client, rpcOps } = makeFakeSupabase(
+      (op) => ({ data: op.table === 'transactions' ? txns : null, error: null }),
+      () => ({ error: null }),
+      () => ({ data: rpcData, error: null }),
+    );
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.auth = { userId: 'u1', email: 'a@b.com', token: 't' };
+      req.supabase = client;
+      next();
+    });
+    app.use('/statements', statementsRouter);
+    app.use(errorHandler);
+    return { app, rpcOps };
+  }
+
+  it('chama a RPC dedicada e devolve os lançamentos atualizados', async () => {
+    const txns = [{ id: U1, ordem: 0, direction: 'saida', classificacao_id: CL1 }];
+    const { app, rpcOps } = appWithRpc(1, txns);
+    const res = await request(app)
+      .patch('/statements/s1/classificacao')
+      .send({ updates: [{ id: U1, classificacao_id: CL1 }] });
+
+    expect(res.status).toBe(200);
+    expect(rpcOps[0]).toMatchObject({
+      fn: 'update_transactions_classificacao',
+      args: { p_statement: 's1' },
+    });
+    expect(res.body.transactions).toEqual(txns);
+    expect(res.body.updated).toBe(1);
+  });
+
+  it('não mexe em conta_contabil/hist_code — só manda id + classificacao_id pra RPC', async () => {
+    const { app, rpcOps } = appWithRpc(1, []);
+    await request(app)
+      .patch('/statements/s1/classificacao')
+      .send({ updates: [{ id: U1, classificacao_id: null }] });
+    expect(rpcOps[0]?.args.p_updates).toEqual([{ id: U1, classificacao_id: null }]);
+  });
+
+  it('404 quando nenhum lançamento é atualizado', async () => {
+    const { app } = appWithRpc(0, []);
+    const res = await request(app)
+      .patch('/statements/s1/classificacao')
+      .send({ updates: [{ id: U1, classificacao_id: null }] });
+    expect(res.status).toBe(404);
+  });
+
+  it('400 se updates vazio', async () => {
+    const { app } = appWithRpc(0, []);
+    const res = await request(app).patch('/statements/s1/classificacao').send({ updates: [] });
+    expect(res.status).toBe(400);
   });
 });
