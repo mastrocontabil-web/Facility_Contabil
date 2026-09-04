@@ -84,7 +84,21 @@ classificacoesRouter.patch('/:id', async (req, res, next) => {
 // DELETE /api/classificacoes/:id
 classificacoesRouter.delete('/:id', async (req, res, next) => {
   try {
-    const { error, count } = await db(req)
+    const supabase = db(req);
+
+    // em uso em algum lançamento → não deixa excluir (só desativar)
+    const { count: emUso, error: uErr } = await supabase
+      .from('transactions')
+      .select('id', { count: 'exact', head: true })
+      .eq('classificacao_id', req.params.id);
+    if (uErr) throw mapPgrstError(uErr, 'verificar uso da classificação');
+    if (emUso) {
+      throw badRequest(
+        `Essa classificação está em uso em ${emUso} lançamento(s) e não pode ser excluída. Desative em vez de excluir.`,
+      );
+    }
+
+    const { error, count } = await supabase
       .from(TABLE)
       .delete({ count: 'exact' })
       .eq('id', req.params.id);

@@ -98,14 +98,34 @@ describe('classificacoesRouter', () => {
   });
 
   it('DELETE /:id 204', async () => {
-    const { app } = appWith(() => ({ data: null, error: null, count: 1 }));
+    const { app } = appWith((op) =>
+      op.table === 'transactions'
+        ? { data: null, error: null, count: 0 }
+        : { data: null, error: null, count: 1 },
+    );
     const res = await request(app).delete('/classificacoes/cl-1');
     expect(res.status).toBe(204);
   });
 
   it('DELETE /:id 404 quando não existe', async () => {
-    const { app } = appWith(() => ({ data: null, error: null, count: 0 }));
+    const { app } = appWith((op) =>
+      op.table === 'transactions'
+        ? { data: null, error: null, count: 0 }
+        : { data: null, error: null, count: 0 },
+    );
     const res = await request(app).delete('/classificacoes/cl-1');
     expect(res.status).toBe(404);
+  });
+
+  it('DELETE /:id 400 quando está em uso em algum lançamento', async () => {
+    const { app, ops } = appWith((op) =>
+      op.table === 'transactions'
+        ? { data: null, error: null, count: 2 }
+        : { data: null, error: null, count: 1 },
+    );
+    const res = await request(app).delete('/classificacoes/cl-1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/em uso/i);
+    expect(ops.some((o) => o.table === 'classificacoes' && o.verb === 'delete')).toBe(false);
   });
 });

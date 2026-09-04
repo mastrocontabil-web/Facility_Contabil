@@ -184,7 +184,7 @@ function Catalogo({
       <ConfirmDialog
         open={!!deleting}
         title="Excluir classificação"
-        message={`Excluir "${deleting?.nome}"? Lançamentos já classificados com ela ficam sem classificação.`}
+        message={`Excluir "${deleting?.nome}"? Só é possível se ela não estiver em uso em nenhum lançamento — nesse caso, desative em vez de excluir.`}
         busy={deleteMut.isPending}
         error={
           deleteMut.isError
