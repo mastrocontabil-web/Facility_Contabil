@@ -31,7 +31,7 @@ export function LoginPage() {
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
       <div className="card w-full max-w-sm p-6">
-        <h1 className="text-lg font-semibold text-slate-800">Extrato → Domínio</h1>
+        <h1 className="text-lg font-semibold text-slate-800">Facility Contábil</h1>
         <p className="mt-1 text-sm text-slate-500">Entre com sua conta do escritório.</p>
 
         <form onSubmit={onSubmit} className="mt-6 space-y-4">

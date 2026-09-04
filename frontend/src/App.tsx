@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppLayout } from '@/components/AppLayout';
 import { RequireAuth } from '@/auth/RequireAuth';
 import { LoginPage } from '@/pages/LoginPage';
+import { HubPage } from '@/pages/HubPage';
 import { ClientsPage } from '@/features/clients/ClientsPage';
 import { ImportPage } from '@/features/import/ImportPage';
 import { RevisaoPage } from '@/features/revisao/RevisaoPage';
@@ -19,7 +20,7 @@ export function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<Navigate to="/clientes" replace />} />
+        <Route index element={<HubPage />} />
         <Route path="/clientes" element={<ClientsPage />} />
         <Route path="/memoria" element={<MemoriaPage />} />
         <Route path="/importar" element={<ImportPage />} />
