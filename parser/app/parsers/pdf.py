@@ -281,7 +281,9 @@ def _bb_unstick(line: str) -> str:
     line = re.sub(r"\b([DC])(\d{1,3}(?:\.\d{3})*,\d{2})", r"\1 \2", line)
     line = re.sub(r"(\d,\d{2})(\d)", r"\1 \2", line)
     line = re.sub(r"([A-Za-zçãáéíóúâêô])(\d{1,3}(?:\.\d{3}){2,})", r"\1 \2", line)
-    line = re.sub(r"\.(\d{3})(\d{3}(?:\.\d{3})*,\d{2})", r".\1 \2", line)
+    # nº de lote/documento colado no valor: "70.10110.000,00" -> "70.101 10.000,00"
+    # (grupo de 3 dígitos seguido de dígito que inicia um valor com ,NN)
+    line = re.sub(r"(\.\d{3})(\d{1,3}(?:\.\d{3})*,\d{2}\b)", r"\1 \2", line)
     return line
 
 

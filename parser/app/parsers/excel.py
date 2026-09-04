@@ -35,7 +35,9 @@ def parse_xlsx(content: bytes) -> ParseResult:
     except ImportError as e:  # pragma: no cover
         raise RuntimeError("openpyxl não instalado") from e
 
-    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    # read_only=False: o modo streaming da openpyxl trunca alguns extratos de
+    # banco (confia numa dimensão declarada errada). Planilha de extrato é pequena.
+    wb = load_workbook(io.BytesIO(content), read_only=False, data_only=True, keep_links=False)
     ws = wb.active
     rows = [[_cell_str(c) for c in row] for row in ws.iter_rows(values_only=True)]
     wb.close()
