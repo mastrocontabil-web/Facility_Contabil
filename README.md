@@ -102,7 +102,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **92 testes no backend**, **22 no parser**.
+Hoje: **95 testes no backend**, **26 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -119,7 +119,7 @@ caminho não existe (não quebra em outra máquina).
 
 ## Estado atual
 
-**Milestones 1–6 entregues** (ver [`docs/roadmap.md`](docs/roadmap.md)):
+**Milestones 1–7 entregues** (ver [`docs/roadmap.md`](docs/roadmap.md)):
 
 - **1** — scaffold, Supabase Auth (ES256/JWKS), schema + RLS por `owner_id`, health checks.
 - **2** — CRUD de clientes isolado por usuário, validação de CNPJ/CPF.
@@ -135,5 +135,15 @@ caminho não existe (não quebra em outra máquina).
 - **6** — **exportador do arquivo Domínio** (Leiaute Domínio Sistemas) + download.
   **Testado ponta a ponta: importa no Domínio Contábil sem erro.** Formato
   decodificado de um export real do Domínio; golden test byte-a-byte.
+- **7** — **reimportar** um extrato (troca o arquivo sem recadastrar), histórico
+  com filtro por cliente/status e exclusão em massa, polimento de UX
+  (responsivo, aviso antes de sair da revisão sem salvar).
 
-**Próximo: Milestone 7** — histórico + polimento. Depois: **8** — deploy.
+**Próximo: Milestone 8** — deploy (hospedar de verdade, fora do `localhost`).
+
+## Uso no dia a dia
+
+`iniciar.bat` sobe os 3 serviços com um clique. Pra rodar em outra máquina,
+`empacotar.ps1` gera um `.zip` (com os `.env`, sem `node_modules`/`.venv`) e
+`configurar.bat` instala tudo na máquina nova — ver os comentários de cada
+script.

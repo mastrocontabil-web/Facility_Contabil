@@ -7,9 +7,9 @@
 | 3 | Upload + Parser (OFX/CSV/XLS/XLSX/PDF) + endpoints + tela de importação | ✅ feito (verificado E2E) |
 | 4 | Tela de Revisão — edição inline das contas, ações em massa, inativar, saldo | ✅ feito |
 | 5 | Regras / memória por cliente | ✅ feito |
-| 6 | Exportador Domínio + teste golden + download | ✅ feito (golden byte-a-byte) |
-| 7 | Histórico + polimento | ⏳ próximo |
-| 8 | Deploy + docs de operação | ⬜ |
+| 6 | Exportador Domínio + teste golden + download | ✅ feito (golden byte-a-byte, importou no Domínio real) |
+| 7 | Reimportar + histórico + polimento | ✅ feito |
+| 8 | Deploy + docs de operação | ⏳ próximo |
 
 ## Milestone 4 — entregue
 
@@ -66,13 +66,32 @@ pesado. Reformulado pra **aprender sozinho**:
   Histórico. Zero migration.
 - Detalhe `docs/leiaute-dominio.md`.
 
-## Onde paramos (2026-09-03)
+## Milestone 7 — entregue
 
-M1–M6 prontos e o M6 já importou no Domínio de verdade. `npm run dev`
-(3 serviços). 92 testes no backend, 22 no parser.
+- **Reimportar**: `POST /api/statements/:id/reimport` troca o arquivo de uma
+  importação existente — reparseia, apaga os lançamentos antigos, reaplica a
+  memória, recalcula totais/saldo, volta pra "em revisão". Mantém cliente,
+  conta banco, hist codes, lote, saldo inicial. Erro do parser marca
+  `status='erro'` sem apagar os lançamentos atuais. Handler de import (`POST /`)
+  refatorado pra compartilhar a lógica (`gravarLancamentos`).
+- **Histórico**: filtro por cliente e status, coluna "Saldo final", seleção
+  múltipla + exclusão em massa.
+- **Polimento**: cabeçalho responsivo (nav com scroll próprio em tela
+  estreita), formulários em 1 coluna no celular, tabela de clientes com
+  `overflow-x-auto`, favicon, aviso antes de sair da revisão com alterações
+  não salvas (beforeunload + confirmação no "Voltar").
+- Bônus: 2 bugs de parser corrigidos rodando a bateria `C:\SEFIP\EXTRATOS`
+  (PDF do BB "Consultas" lendo saldo em vez de valor; XLSX truncado pela
+  openpyxl). `test_sefip_bancos.py` agora cobre todas as pastas, não só as
+  com OFX. Repo publicado no GitHub (histórico zerado, sem dado de cliente).
 
-**Próximo: Milestone 7** — histórico + polimento (reimportar, apagar em massa,
-UX), e depois **8** — deploy.
+## Onde paramos (2026-09-04)
+
+M1–M7 prontos. `npm run dev` (3 serviços) ou `iniciar.bat`. 95 testes no
+backend, 26 no parser.
+
+**Próximo: Milestone 8** — deploy (hospedar de verdade, fora do
+`localhost`) + docs de operação.
 
 ## Milestone 1 — entregue
 
