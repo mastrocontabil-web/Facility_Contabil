@@ -1,26 +1,51 @@
-# Sistema Extrato → Domínio
+# Facility Contábil
 
 Web app para transformar **extrato bancário** (PDF/OFX/CSV/XLS/XLSX) em **arquivo de
 importação de lançamentos contábeis em lote** no **Leiaute Domínio Sistemas**.
 
-Fluxo:
+Depois do login cai num **hub** com três módulos:
 
-1. **Cadastra o cliente** — código da empresa no Domínio, conta contábil do banco,
-   códigos de histórico padrão e o **saldo inicial da conta bancária**.
-2. **Sobe o extrato do mês** (PDF/OFX/CSV/XLS/XLSX). O sistema lê os lançamentos,
-   separa entradas/saídas e mostra o **saldo bancário acumulado por lançamento**
-   com um painel de conferência — pra bater com o saldo do extrato no fim do mês.
-   O saldo inicial vem **encadeado** do extrato anterior daquele cliente (fecha um
-   mês, abre o próximo).
-3. **Revisa** — por linha: conta contábil da contrapartida, código de histórico e
+- **Cadastros** — clientes: código no Domínio, conta contábil do banco, códigos
+  de histórico padrão e o **saldo inicial da conta bancária**.
+- **Importação** — o fluxo contábil de ponta a ponta (abaixo).
+- **Classificação** — categoriza os lançamentos do extrato por tipo de despesa/
+  receita (água, energia, recebimento de clientes…) **antes** de virar
+  contabilidade; serve pra quem quer separar "o que aconteceu no extrato" de
+  "qual conta contábil isso vira".
+
+## Fluxo — Importação
+
+1. **Escolhe o cliente** e **sobe o extrato do mês** (PDF/OFX/CSV/XLS/XLSX) — ou
+   **puxa um extrato já classificado** no módulo Classificação, sem reimportar o
+   arquivo. O sistema lê os lançamentos, separa entradas/saídas e mostra o
+   **saldo bancário acumulado por lançamento** com um painel de conferência —
+   pra bater com o saldo do extrato no fim do mês. O saldo inicial vem
+   **encadeado** do extrato anterior daquele cliente (fecha um mês, abre o
+   próximo).
+2. **Revisa** — por linha: conta contábil da contrapartida, código de histórico e
    complemento (texto livre). Ações em massa por entrada/saída, e dá pra **inativar**
    lançamentos que não devem ir pro arquivo. Ao salvar, cada classificação vira
    **memória do cliente** (`descrição do extrato → conta`) e volta pré-preenchida
    no mês seguinte; descrição já usada com contas diferentes vem marcada
-   "conferir".
-4. **Gera o `.txt`** no Leiaute Domínio e baixa — pronto pra importar em
+   "conferir". Quando o extrato veio do módulo Classificação, a categoria de
+   cada lançamento aparece como contexto e pode entrar no complemento do
+   arquivo junto com (ou no lugar do) texto digitado.
+3. **Gera o `.txt`** no Leiaute Domínio e baixa — pronto pra importar em
    Utilitários → Importação → Lançamentos contábeis em lote (testado, importa
    sem erro).
+
+## Fluxo — Classificação
+
+1. Escolhe o cliente e sobe o extrato (mesmo parser da Importação) — aqui não
+   pede conta do banco nem código de histórico, só o essencial pra ler.
+2. Classifica cada lançamento por categoria (não por conta contábil) usando um
+   catálogo próprio do cliente — cria categoria nova direto na tela ("+ nova
+   classificação…"), em massa por entrada/saída. As categorias e as
+   classificações de cada lançamento ficam salvas e valem pra qualquer mês.
+   Uma categoria **em uso não pode ser excluída** (só desativada).
+3. Quando terminar, **puxa pra Importação** — escolhe a conta do banco, os
+   códigos de histórico e o lote, e o mesmo registro segue pro fluxo normal de
+   Revisão/exportação (sem duplicar o extrato).
 
 ## Serviços
 
@@ -102,7 +127,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **95 testes no backend**, **26 no parser**.
+Hoje: **122 testes no backend**, **26 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -119,7 +144,8 @@ caminho não existe (não quebra em outra máquina).
 
 ## Estado atual
 
-**Milestones 1–7 entregues** (ver [`docs/roadmap.md`](docs/roadmap.md)):
+**Milestones 1–7 e 9 entregues** (ver [`docs/roadmap.md`](docs/roadmap.md)); o
+**8 (deploy)** ainda não:
 
 - **1** — scaffold, Supabase Auth (ES256/JWKS), schema + RLS por `owner_id`, health checks.
 - **2** — CRUD de clientes isolado por usuário, validação de CNPJ/CPF.
@@ -138,6 +164,14 @@ caminho não existe (não quebra em outra máquina).
 - **7** — **reimportar** um extrato (troca o arquivo sem recadastrar), histórico
   com filtro por cliente/status e exclusão em massa, polimento de UX
   (responsivo, aviso antes de sair da revisão sem salvar).
+- **9** — rebrand pra **Facility Contábil** + tela de **hub** com os 3 módulos.
+  Módulo **Classificação** novo: importa o extrato e categoriza cada
+  lançamento por tipo de despesa/receita (catálogo por cliente, criado na
+  hora), independente da conta contábil; extrato classificado é **puxado** pra
+  Importação (mesmo registro, sem duplicar) pra virar contabilidade e gerar o
+  arquivo do Domínio. Complemento do arquivo ganha os modos "extrato +
+  classificação" e "extrato + complemento + classificação". Classificação em
+  uso não pode ser excluída (só desativada).
 
 **Próximo: Milestone 8** — deploy (hospedar de verdade, fora do `localhost`).
 
