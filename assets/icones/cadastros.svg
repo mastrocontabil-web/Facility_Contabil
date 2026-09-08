@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#1E293B" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Cadastros">
+  <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+  <circle cx="8" cy="11" r="2.25" />
+  <path d="M4.75 16.4c.5-1.6 1.75-2.4 3.25-2.4s2.75.8 3.25 2.4" />
+  <path d="M14.75 10h4M14.75 13.5h4" />
+</svg>
