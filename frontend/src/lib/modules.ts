@@ -41,6 +41,17 @@ export const MODULES: ModuleDef[] = [
       { to: '/classificacao/categorias', label: 'Classificações' },
     ],
   },
+  {
+    id: 'contabil',
+    label: 'Contábil',
+    description: 'Plano de contas, lançamentos e relatórios contábeis (balancete, razão) a partir do balancete importado.',
+    home: '/contabil/plano-de-contas',
+    match: (p) => p.startsWith('/contabil'),
+    nav: [
+      { to: '/contabil/plano-de-contas', label: 'Plano de contas' },
+      { to: '/contabil/historicos', label: 'Históricos padrão' },
+    ],
+  },
 ];
 
 export function moduleAtPath(pathname: string): ModuleDef | undefined {

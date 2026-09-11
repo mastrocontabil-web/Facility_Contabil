@@ -54,6 +54,16 @@ export function IconClassificacao(props: IconProps) {
   );
 }
 
+/** Contábil — livro razão aberto. */
+export function IconContabil(props: IconProps) {
+  return (
+    <Base {...props}>
+      <path d="M12 6.5c-1.5-1-3.5-1.5-5.5-1.5-1 0-2 .1-3 .3v12c1-.2 2-.3 3-.3 2 0 4 .5 5.5 1.5 1.5-1 3.5-1.5 5.5-1.5 1 0 2 .1 3 .3v-12c-1-.2-2-.3-3-.3-2 0-4 .5-5.5 1.5Z" />
+      <path d="M12 6.5v12" />
+    </Base>
+  );
+}
+
 /** Sair. */
 export function IconLogout(props: IconProps) {
   return (

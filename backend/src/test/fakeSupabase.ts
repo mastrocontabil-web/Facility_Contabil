@@ -2,13 +2,14 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type FakeOp = {
   table: string;
-  verb: 'select' | 'insert' | 'update' | 'delete';
+  verb: 'select' | 'insert' | 'update' | 'delete' | 'upsert';
   filters: Array<[string, unknown]>;
   payload?: unknown;
   single?: 'single' | 'maybeSingle' | null;
   orderBy?: string;
   limit?: number;
   or?: string;
+  onConflict?: string;
 };
 
 export type FakeResult = { data?: unknown; error?: unknown; count?: number | null };
@@ -58,6 +59,12 @@ export function makeFakeSupabase(
       insert(payload: unknown) {
         op.verb = 'insert';
         op.payload = payload;
+        return builder;
+      },
+      upsert(payload: unknown, opts?: { onConflict?: string }) {
+        op.verb = 'upsert';
+        op.payload = payload;
+        if (opts?.onConflict) op.onConflict = opts.onConflict;
         return builder;
       },
       update(payload: unknown) {

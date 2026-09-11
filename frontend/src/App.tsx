@@ -12,6 +12,8 @@ import { ClassificarPage } from '@/features/classificacao/ClassificarPage';
 import { ClassificacaoRevisaoPage } from '@/features/classificacao/ClassificacaoRevisaoPage';
 import { ClassificacaoHistoricoPage } from '@/features/classificacao/ClassificacaoHistoricoPage';
 import { CategoriasPage } from '@/features/classificacao/CategoriasPage';
+import { PlanoContasPage } from '@/features/contabil/PlanoContasPage';
+import { HistoricosPadraoPage } from '@/features/contabil/HistoricosPadraoPage';
 
 export function App() {
   return (
@@ -34,6 +36,8 @@ export function App() {
         <Route path="/classificacao/revisao/:id" element={<ClassificacaoRevisaoPage />} />
         <Route path="/classificacao/historico" element={<ClassificacaoHistoricoPage />} />
         <Route path="/classificacao/categorias" element={<CategoriasPage />} />
+        <Route path="/contabil/plano-de-contas" element={<PlanoContasPage />} />
+        <Route path="/contabil/historicos" element={<HistoricosPadraoPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

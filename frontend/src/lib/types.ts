@@ -91,6 +91,33 @@ export type Classificacao = {
   updated_at: string;
 };
 
+export type TipoConta = 'S' | 'A';
+export type Natureza = 'devedora' | 'credora';
+
+export type PlanoConta = {
+  id: string;
+  client_id: string;
+  codigo: string;
+  tipo: TipoConta;
+  classificacao: string;
+  nome: string;
+  grau: number;
+  parent_id: string | null;
+  natureza: Natureza | null;
+  ativo: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HistoricoPadrao = {
+  id: string;
+  codigo: string;
+  descricao: string;
+  ativo: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MatchType = 'contains' | 'starts_with' | 'regex' | 'exact';
 
 export type MappingRule = {

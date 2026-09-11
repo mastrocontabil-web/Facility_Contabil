@@ -63,7 +63,8 @@ _MONEY_TOKEN_RE = re.compile(
 )
 
 
-def _extract_text(content: bytes, password: str | None) -> str:
+def extract_pdf_text(content: bytes, password: str | None) -> str:
+    """Extrai texto de PDF (com senha); compartilhado com os parsers do módulo Contábil."""
     import pdfplumber
     from pdfminer.pdfdocument import PDFPasswordIncorrect
 
@@ -474,7 +475,7 @@ def _result(text: str, txns: list[NormalizedTransaction], seen: list[date]) -> P
 
 
 def parse_pdf(content: bytes, password: str | None = None) -> ParseResult:
-    text = _extract_text(content, password)
+    text = extract_pdf_text(content, password)
 
     if _looks_like_nubank(text):
         return _parse_nubank_pdf(text)

@@ -30,3 +30,16 @@ class ParseError(BaseModel):
     error: str
     format: FileFormat | None = None
     hint: str | None = None
+
+
+class PlanoContaItem(BaseModel):
+    codigo: str = Field(description="Código reduzido")
+    tipo: Literal["S", "A"] = Field(description="S = sintética (grupo), A = analítica (lançável)")
+    classificacao: str = Field(description="Código hierárquico pontuado, ex: 1.1.1.02.000003")
+    nome: str
+    grau: int = Field(ge=1, le=5)
+
+
+class PlanoContasParseResult(BaseModel):
+    items: list[PlanoContaItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

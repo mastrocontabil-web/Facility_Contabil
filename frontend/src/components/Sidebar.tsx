@@ -2,12 +2,13 @@ import type { ComponentType, SVGProps } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/useAuth';
 import { MODULES, moduleAtPath } from '@/lib/modules';
-import { IconCadastros, IconClassificacao, IconImportacao, IconLogout } from './icons';
+import { IconCadastros, IconClassificacao, IconContabil, IconImportacao, IconLogout } from './icons';
 
 const MODULE_ICON: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   cadastros: IconCadastros,
   importacao: IconImportacao,
   classificacao: IconClassificacao,
+  contabil: IconContabil,
 };
 
 /** Conteúdo da barra lateral — reaproveitado no fixo (desktop) e na gaveta (mobile). */
