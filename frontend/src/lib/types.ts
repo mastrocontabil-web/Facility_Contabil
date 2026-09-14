@@ -118,6 +118,38 @@ export type HistoricoPadrao = {
   updated_at: string;
 };
 
+export type StatusPeriodo = 'aberto' | 'fechado';
+export type NaturezaDC = 'D' | 'C';
+
+export type PeriodoContabil = {
+  id: string;
+  client_id: string;
+  ano: number;
+  mes: number;
+  status: StatusPeriodo;
+  fechado_em: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SaldoContabil = {
+  id: string;
+  periodo_id: string;
+  plano_conta_id: string | null;
+  codigo: string;
+  nome: string;
+  tipo: TipoConta;
+  ordem: number;
+  saldo_anterior_cents: number;
+  saldo_anterior_natureza: NaturezaDC | null;
+  debito_cents: number;
+  credito_cents: number;
+  saldo_atual_cents: number;
+  saldo_atual_natureza: NaturezaDC | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MatchType = 'contains' | 'starts_with' | 'regex' | 'exact';
 
 export type MappingRule = {

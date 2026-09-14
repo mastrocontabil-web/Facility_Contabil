@@ -21,3 +21,7 @@ export function formatDate(iso: string): string {
 export function formatMoney(cents: number): string {
   return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
+
+export function formatCompetencia(ano: number, mes: number): string {
+  return `${String(mes).padStart(2, '0')}/${ano}`;
+}

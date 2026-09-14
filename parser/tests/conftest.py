@@ -111,6 +111,11 @@ def plano_contas_pdf_bytes() -> bytes:
 
 
 @pytest.fixture
+def balancete_pdf_bytes() -> bytes:
+    return _read_long(_need("balancete_pdf"))
+
+
+@pytest.fixture
 def itau_samples() -> dict[str, bytes]:
     base = _need("itau_dir")
     stem = "Extrato_8403_992681_07-07-2026"

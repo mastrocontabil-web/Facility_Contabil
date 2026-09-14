@@ -14,18 +14,37 @@ export type PlanoContasParseResult = {
   warnings: string[];
 };
 
+export type BalanceteContaItem = {
+  codigo: string;
+  nome: string;
+  tipo: 'S' | 'A';
+  saldo_anterior_cents: number;
+  saldo_anterior_natureza: 'D' | 'C' | null;
+  debito_cents: number;
+  credito_cents: number;
+  saldo_atual_cents: number;
+  saldo_atual_natureza: 'D' | 'C' | null;
+};
+
+export type BalanceteParseResult = {
+  periodo: { ano: number; mes: number };
+  items: BalanceteContaItem[];
+  warnings: string[];
+};
+
 type ParserErrorBody = { error?: string; code?: string };
 
-/** Chama o serviço Python de parsing do plano de contas. Erros do parser viram 422. */
-export async function callPlanoContasParser(
+/** Chama um endpoint /parse/... do serviço Python. Erros do parser viram 422. */
+async function callParser<T>(
+  path: string,
   file: { buffer: Buffer; originalname: string; mimetype: string },
   opts: { pdfPassword?: string } = {},
-): Promise<PlanoContasParseResult> {
+): Promise<T> {
   const form = new FormData();
   form.append(
     'file',
     new Blob([file.buffer], { type: file.mimetype || 'application/octet-stream' }),
-    file.originalname || 'plano-de-contas.pdf',
+    file.originalname || 'arquivo.pdf',
   );
   if (opts.pdfPassword) form.append('pdf_password', opts.pdfPassword);
 
@@ -34,7 +53,7 @@ export async function callPlanoContasParser(
 
   let res: Response;
   try {
-    res = await fetch(`${config.parser.url}/parse/plano-contas`, {
+    res = await fetch(`${config.parser.url}${path}`, {
       method: 'POST',
       body: form,
       headers,
@@ -56,11 +75,25 @@ export async function callPlanoContasParser(
 
   if (res.status === 422) {
     const b = (body ?? {}) as ParserErrorBody;
-    throw unprocessable(b.error ?? 'Não foi possível ler o plano de contas', { code: b.code });
+    throw unprocessable(b.error ?? 'Não foi possível ler o arquivo', { code: b.code });
   }
   if (!res.ok) {
     throw badGateway(`Parser retornou HTTP ${res.status}`, { detail: body });
   }
 
-  return body as PlanoContasParseResult;
+  return body as T;
+}
+
+export async function callPlanoContasParser(
+  file: { buffer: Buffer; originalname: string; mimetype: string },
+  opts: { pdfPassword?: string } = {},
+): Promise<PlanoContasParseResult> {
+  return callParser<PlanoContasParseResult>('/parse/plano-contas', file, opts);
+}
+
+export async function callBalanceteParser(
+  file: { buffer: Buffer; originalname: string; mimetype: string },
+  opts: { pdfPassword?: string } = {},
+): Promise<BalanceteParseResult> {
+  return callParser<BalanceteParseResult>('/parse/balancete', file, opts);
 }

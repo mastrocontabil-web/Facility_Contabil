@@ -10,11 +10,12 @@ from .parsers import (
     EncryptedFileError,
     EncryptedPdfError,
     UnsupportedFormatError,
+    parse_balancete_pdf,
     parse_plano_contas_pdf,
     parse_statement,
 )
 from .parsers.pdf import UnreadablePdfError
-from .schemas import ParseResult, PlanoContasParseResult
+from .schemas import BalanceteParseResult, ParseResult, PlanoContasParseResult
 from .security import require_shared_secret
 
 logging.basicConfig(level=logging.INFO)
@@ -90,4 +91,37 @@ async def parse_plano_contas(
         raise HTTPException(status_code=422, detail=f"falha ao ler o plano de contas: {exc}") from exc
 
     logger.info("parse plano-contas ok: %s contas=%d", filename, len(result.items))
+    return result
+
+
+@app.post(
+    "/parse/balancete",
+    response_model=BalanceteParseResult,
+    dependencies=[Depends(require_shared_secret)],
+)
+async def parse_balancete(
+    file: UploadFile = File(...),
+    pdf_password: str | None = Form(default=None),
+) -> BalanceteParseResult:
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="arquivo muito grande")
+    if not content:
+        raise HTTPException(status_code=400, detail="arquivo vazio")
+
+    filename = file.filename or "balancete.pdf"
+    try:
+        result = parse_balancete_pdf(content, pdf_password)
+    except (EncryptedPdfError,) as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc), "code": "encrypted"})
+    except UnreadablePdfError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc), "code": "unreadable"})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("falha ao parsear balancete %s", filename)
+        raise HTTPException(status_code=422, detail=f"falha ao ler o balancete: {exc}") from exc
+
+    logger.info(
+        "parse balancete ok: %s período=%02d/%d contas=%d",
+        filename, result.periodo.mes, result.periodo.ano, len(result.items),
+    )
     return result

@@ -3,7 +3,12 @@ import { ApiError } from '@/lib/api';
 import { useClients } from '@/features/clients/api';
 import { FileDrop } from '@/components/FileDrop';
 import type { PlanoConta } from '@/lib/types';
-import { useImportarPlanoContas, usePlanoContas, useUpdatePlanoConta } from './api';
+import {
+  useCreatePlanoConta,
+  useImportarPlanoContas,
+  usePlanoContas,
+  useUpdatePlanoConta,
+} from './api';
 
 export function PlanoContasPage() {
   const { data: clients, isLoading: loadingClients } = useClients({ ativo: 'true' });
@@ -19,6 +24,14 @@ export function PlanoContasPage() {
 
   const { data: contas, isLoading: loadingContas, error } = usePlanoContas(clientId || undefined);
   const importMut = useImportarPlanoContas();
+  const createMut = useCreatePlanoConta();
+
+  const [mostrarCriar, setMostrarCriar] = useState(false);
+  const [novoCodigo, setNovoCodigo] = useState('');
+  const [novoTipo, setNovoTipo] = useState<'S' | 'A'>('A');
+  const [novaClassificacao, setNovaClassificacao] = useState('');
+  const [novoNome, setNovoNome] = useState('');
+  const [novoGrau, setNovoGrau] = useState('5');
 
   const isPdf = file?.name.toLowerCase().endsWith('.pdf');
 
@@ -31,6 +44,31 @@ export function PlanoContasPage() {
         onSuccess: (r) => {
           setResultado({ criadas: r.criadas, atualizadas: r.atualizadas, warnings: r.warnings });
           setFile(null);
+        },
+      },
+    );
+  }
+
+  function criarConta(e: React.FormEvent) {
+    e.preventDefault();
+    if (!clientId || !novoCodigo.trim() || !novaClassificacao.trim() || !novoNome.trim()) return;
+    createMut.mutate(
+      {
+        client_id: clientId,
+        codigo: novoCodigo.trim(),
+        tipo: novoTipo,
+        classificacao: novaClassificacao.trim(),
+        nome: novoNome.trim(),
+        grau: Number(novoGrau),
+      },
+      {
+        onSuccess: () => {
+          setNovoCodigo('');
+          setNovaClassificacao('');
+          setNovoNome('');
+          setNovoTipo('A');
+          setNovoGrau('5');
+          setMostrarCriar(false);
         },
       },
     );
@@ -126,12 +164,88 @@ export function PlanoContasPage() {
             </div>
           )}
 
-          <input
-            className="input max-w-sm"
-            value={busca}
-            onChange={(e) => setBusca(e.target.value)}
-            placeholder="Buscar por código, classificação ou nome…"
-          />
+          <div className="flex items-center gap-3">
+            <input
+              className="input max-w-sm"
+              value={busca}
+              onChange={(e) => setBusca(e.target.value)}
+              placeholder="Buscar por código, classificação ou nome…"
+            />
+            <button
+              type="button"
+              className="text-xs text-slate-400 hover:text-brand-600"
+              onClick={() => setMostrarCriar((v) => !v)}
+            >
+              {mostrarCriar ? 'cancelar' : '+ cadastrar conta manualmente'}
+            </button>
+          </div>
+
+          {mostrarCriar && (
+            <form onSubmit={criarConta} className="card flex flex-wrap items-end gap-2 p-4">
+              <div className="w-28">
+                <label className="label">Código</label>
+                <input
+                  className="input h-9"
+                  value={novoCodigo}
+                  onChange={(e) => setNovoCodigo(e.target.value.replace(/\D/g, ''))}
+                  placeholder="ex: 10298"
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="w-24">
+                <label className="label">Tipo</label>
+                <select
+                  className="input h-9"
+                  value={novoTipo}
+                  onChange={(e) => setNovoTipo(e.target.value as 'S' | 'A')}
+                >
+                  <option value="A">A (analítica)</option>
+                  <option value="S">S (sintética)</option>
+                </select>
+              </div>
+              <div className="w-44">
+                <label className="label">Classificação</label>
+                <input
+                  className="input h-9"
+                  value={novaClassificacao}
+                  onChange={(e) => setNovaClassificacao(e.target.value)}
+                  placeholder="ex: 1.1.1.02.000003"
+                />
+              </div>
+              <div className="w-20">
+                <label className="label">Grau</label>
+                <select className="input h-9" value={novoGrau} onChange={(e) => setNovoGrau(e.target.value)}>
+                  {[1, 2, 3, 4, 5].map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="min-w-[240px] flex-1">
+                <label className="label">Nome</label>
+                <input
+                  className="input h-9"
+                  value={novoNome}
+                  onChange={(e) => setNovoNome(e.target.value)}
+                  placeholder="nome da conta"
+                />
+              </div>
+              <button
+                className="btn-primary h-9 px-4"
+                disabled={
+                  !novoCodigo.trim() || !novaClassificacao.trim() || !novoNome.trim() || createMut.isPending
+                }
+              >
+                {createMut.isPending ? 'Cadastrando…' : 'Cadastrar'}
+              </button>
+              {createMut.error && (
+                <p className="w-full text-xs text-red-600">
+                  {createMut.error instanceof ApiError ? createMut.error.message : 'Falha ao cadastrar'}
+                </p>
+              )}
+            </form>
+          )}
 
           <div className="card overflow-x-auto p-0">
             {loadingContas ? (

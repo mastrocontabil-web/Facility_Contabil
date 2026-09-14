@@ -46,6 +46,19 @@ export const historicoPadraoCreateSchema = z.object({
 
 export const historicoPadraoUpdateSchema = historicoPadraoCreateSchema.partial();
 
+export const importarBalanceteSchema = z.object({
+  client_id: z.string().uuid(),
+  pdf_password: z.string().max(200).optional(),
+});
+
+export const periodosListQuerySchema = z.object({
+  client_id: z.string().uuid(),
+});
+
+export const saldosListQuerySchema = z.object({
+  periodo_id: z.string().uuid(),
+});
+
 export type PlanoContaCreate = z.infer<typeof planoContaCreateSchema>;
 export type PlanoContaUpdate = z.infer<typeof planoContaUpdateSchema>;
 export type HistoricoPadraoCreate = z.infer<typeof historicoPadraoCreateSchema>;

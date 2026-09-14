@@ -14,6 +14,7 @@ import { ClassificacaoHistoricoPage } from '@/features/classificacao/Classificac
 import { CategoriasPage } from '@/features/classificacao/CategoriasPage';
 import { PlanoContasPage } from '@/features/contabil/PlanoContasPage';
 import { HistoricosPadraoPage } from '@/features/contabil/HistoricosPadraoPage';
+import { BalancetePage } from '@/features/contabil/BalancetePage';
 
 export function App() {
   return (
@@ -38,6 +39,7 @@ export function App() {
         <Route path="/classificacao/categorias" element={<CategoriasPage />} />
         <Route path="/contabil/plano-de-contas" element={<PlanoContasPage />} />
         <Route path="/contabil/historicos" element={<HistoricosPadraoPage />} />
+        <Route path="/contabil/balancete" element={<BalancetePage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

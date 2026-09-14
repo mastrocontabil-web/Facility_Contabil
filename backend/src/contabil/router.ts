@@ -6,12 +6,15 @@ import { badRequest, notFound } from '../lib/httpError.js';
 import {
   historicoPadraoCreateSchema,
   historicoPadraoUpdateSchema,
+  importarBalanceteSchema,
   importarPlanoContasSchema,
+  periodosListQuerySchema,
   planoContaCreateSchema,
   planoContaListQuerySchema,
   planoContaUpdateSchema,
+  saldosListQuerySchema,
 } from './schema.js';
-import { callPlanoContasParser } from './parserClient.js';
+import { callBalanceteParser, callPlanoContasParser } from './parserClient.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -23,6 +26,13 @@ const PLANO_COLS =
   'id, client_id, codigo, tipo, classificacao, nome, grau, parent_id, natureza, ativo, created_at, updated_at';
 const HIST_TABLE = 'historicos_padrao';
 const HIST_COLS = 'id, codigo, descricao, ativo, created_at, updated_at';
+const PERIODO_TABLE = 'periodos_contabeis';
+const PERIODO_COLS = 'id, client_id, ano, mes, status, fechado_em, created_at, updated_at';
+const SALDO_TABLE = 'saldos_contabeis';
+const SALDO_COLS =
+  'id, periodo_id, plano_conta_id, codigo, nome, tipo, ordem, saldo_anterior_cents, ' +
+  'saldo_anterior_natureza, debito_cents, credito_cents, saldo_atual_cents, ' +
+  'saldo_atual_natureza, created_at, updated_at';
 
 export const contabilRouter = Router();
 
@@ -283,6 +293,155 @@ contabilRouter.delete('/historicos/:id', async (req, res, next) => {
     if (error) throw mapPgrstError(error, 'excluir histórico padrão');
     if (!count) throw notFound('Histórico padrão não encontrado');
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// POST /balancete/importar  — upload do PDF, lê e grava saldos do período
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/balancete/importar', upload.single('file'), async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+
+  try {
+    if (!req.file) throw badRequest('Arquivo do balancete é obrigatório (campo "file")');
+    const dto = importarBalanceteSchema.parse(req.body);
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', dto.client_id)
+      .maybeSingle();
+    if (cErr) throw mapPgrstError(cErr, 'validar cliente');
+    if (!client) throw notFound('Cliente não encontrado');
+
+    const parsed = await callBalanceteParser(
+      { buffer: req.file.buffer, originalname: req.file.originalname, mimetype: req.file.mimetype },
+      { pdfPassword: dto.pdf_password },
+    );
+    if (!parsed.items.length) {
+      throw badRequest('Nenhuma conta encontrada no balancete', { warnings: parsed.warnings });
+    }
+
+    const { data: periodoRow, error: pErr } = await supabase
+      .from(PERIODO_TABLE)
+      .upsert(
+        {
+          owner_id: userId,
+          client_id: dto.client_id,
+          ano: parsed.periodo.ano,
+          mes: parsed.periodo.mes,
+          status: 'fechado',
+          fechado_em: new Date().toISOString(),
+        },
+        { onConflict: 'client_id,ano,mes' },
+      )
+      .select(PERIODO_COLS)
+      .single();
+    if (pErr) throw mapPgrstError(pErr, 'gravar período contábil');
+
+    const { data: existentes, error: eErr } = await supabase
+      .from(SALDO_TABLE)
+      .select('codigo')
+      .eq('periodo_id', periodoRow.id);
+    if (eErr) throw mapPgrstError(eErr, 'ler saldos do período');
+    const codigosExistentes = new Set((existentes ?? []).map((s) => s.codigo as string));
+
+    const { data: plano, error: plErr } = await supabase
+      .from(PLANO_TABLE)
+      .select('id, codigo, tipo')
+      .eq('client_id', dto.client_id);
+    if (plErr) throw mapPgrstError(plErr, 'ler plano de contas do cliente');
+    const planoPorCodigo = new Map((plano ?? []).map((p) => [p.codigo as string, p]));
+
+    const warnings = [...parsed.warnings];
+    const rows = parsed.items.map((item, ordem) => {
+      const vinculo = planoPorCodigo.get(item.codigo);
+      if (!vinculo) {
+        warnings.push(
+          `conta ${item.codigo} (${item.nome}) não encontrada no plano de contas — saldo importado sem vínculo`,
+        );
+      } else if (vinculo.tipo !== item.tipo) {
+        warnings.push(
+          `conta ${item.codigo}: tipo no balancete (${item.tipo}) diverge do plano de contas (${vinculo.tipo})`,
+        );
+      }
+      return {
+        owner_id: userId,
+        periodo_id: periodoRow.id,
+        plano_conta_id: vinculo?.id ?? null,
+        codigo: item.codigo,
+        nome: item.nome,
+        tipo: item.tipo,
+        ordem,
+        saldo_anterior_cents: item.saldo_anterior_cents,
+        saldo_anterior_natureza: item.saldo_anterior_natureza,
+        debito_cents: item.debito_cents,
+        credito_cents: item.credito_cents,
+        saldo_atual_cents: item.saldo_atual_cents,
+        saldo_atual_natureza: item.saldo_atual_natureza,
+      };
+    });
+
+    const { error: upErr } = await supabase
+      .from(SALDO_TABLE)
+      .upsert(rows, { onConflict: 'periodo_id,codigo' });
+    if (upErr) throw mapPgrstError(upErr, 'gravar saldos do período');
+
+    const { data: saldos, error: lErr } = await supabase
+      .from(SALDO_TABLE)
+      .select(SALDO_COLS)
+      .eq('periodo_id', periodoRow.id)
+      .order('ordem', { ascending: true });
+    if (lErr) throw mapPgrstError(lErr, 'reler saldos do período');
+
+    const criadas = parsed.items.filter((i) => !codigosExistentes.has(i.codigo)).length;
+    res.status(201).json({
+      periodo: periodoRow,
+      saldos: saldos ?? [],
+      warnings,
+      criadas,
+      atualizadas: parsed.items.length - criadas,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /periodos?client_id=  — lista períodos do cliente, mais recente primeiro
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/periodos', async (req, res, next) => {
+  try {
+    const { client_id } = periodosListQuerySchema.parse(req.query);
+    const { data, error } = await db(req)
+      .from(PERIODO_TABLE)
+      .select(PERIODO_COLS)
+      .eq('client_id', client_id)
+      .order('ano', { ascending: false })
+      .order('mes', { ascending: false });
+    if (error) throw mapPgrstError(error, 'listar períodos');
+    res.json({ periodos: data ?? [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /saldos?periodo_id=  — saldos de um período, na ordem do balancete
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/saldos', async (req, res, next) => {
+  try {
+    const { periodo_id } = saldosListQuerySchema.parse(req.query);
+    const { data, error } = await db(req)
+      .from(SALDO_TABLE)
+      .select(SALDO_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('ordem', { ascending: true });
+    if (error) throw mapPgrstError(error, 'listar saldos');
+    res.json({ saldos: data ?? [] });
   } catch (err) {
     next(err);
   }

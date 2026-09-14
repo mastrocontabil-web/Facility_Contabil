@@ -43,3 +43,33 @@ class PlanoContaItem(BaseModel):
 class PlanoContasParseResult(BaseModel):
     items: list[PlanoContaItem] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+NaturezaDC = Literal["D", "C"]
+
+
+class BalancetePeriodo(BaseModel):
+    ano: int
+    mes: int = Field(ge=1, le=12)
+
+
+class BalanceteContaItem(BaseModel):
+    codigo: str = Field(description="Código reduzido")
+    nome: str
+    tipo: Literal["S", "A"] = Field(description="S = sintética (grupo), A = analítica (lançável)")
+    saldo_anterior_cents: int = Field(ge=0)
+    saldo_anterior_natureza: NaturezaDC | None = Field(
+        default=None, description="Null quando o saldo anterior é zero (sem D/C no PDF)"
+    )
+    debito_cents: int = Field(ge=0)
+    credito_cents: int = Field(ge=0)
+    saldo_atual_cents: int = Field(ge=0)
+    saldo_atual_natureza: NaturezaDC | None = Field(
+        default=None, description="Null quando o saldo atual é zero (sem D/C no PDF)"
+    )
+
+
+class BalanceteParseResult(BaseModel):
+    periodo: BalancetePeriodo
+    items: list[BalanceteContaItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

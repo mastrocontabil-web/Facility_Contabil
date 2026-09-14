@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..schemas import FileFormat, ParseResult
+from .balancete import parse_balancete_pdf
 from .detect import detect_format
 from .excel import EncryptedFileError, parse_xls, parse_xlsx
 from .ofx import parse_ofx
@@ -12,6 +13,7 @@ __all__ = [
     "detect_format",
     "parse_statement",
     "parse_plano_contas_pdf",
+    "parse_balancete_pdf",
     "UnsupportedFormatError",
     "EncryptedFileError",
     "EncryptedPdfError",

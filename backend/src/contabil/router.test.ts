@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
-vi.mock('./parserClient.js', () => ({ callPlanoContasParser: vi.fn() }));
-import { callPlanoContasParser } from './parserClient.js';
+vi.mock('./parserClient.js', () => ({ callPlanoContasParser: vi.fn(), callBalanceteParser: vi.fn() }));
+import { callBalanceteParser, callPlanoContasParser } from './parserClient.js';
 import { contabilRouter } from './router.js';
 import { errorHandler } from '../middleware/error.js';
 import { makeFakeSupabase, type FakeHandler, type FakeOp } from '../test/fakeSupabase.js';
 
 const mockedParser = vi.mocked(callPlanoContasParser);
+const mockedBalanceteParser = vi.mocked(callBalanceteParser);
 
 function appWith(handler: FakeHandler) {
   const { client, ops, rpcOps } = makeFakeSupabase(handler);
@@ -47,7 +48,35 @@ const contaSample = {
   ativo: true,
 };
 
-beforeEach(() => mockedParser.mockReset());
+const PERIODO_ID = '22222222-2222-2222-2222-222222222222';
+const periodoSample = {
+  id: PERIODO_ID,
+  client_id: CID,
+  ano: 2026,
+  mes: 6,
+  status: 'fechado',
+  fechado_em: '2026-06-30T00:00:00.000Z',
+};
+const saldoSample = {
+  id: 's1',
+  periodo_id: PERIODO_ID,
+  plano_conta_id: 'pc-1',
+  codigo: '1',
+  nome: 'ATIVO',
+  tipo: 'S',
+  ordem: 0,
+  saldo_anterior_cents: 100,
+  saldo_anterior_natureza: 'D',
+  debito_cents: 0,
+  credito_cents: 0,
+  saldo_atual_cents: 100,
+  saldo_atual_natureza: 'D',
+};
+
+beforeEach(() => {
+  mockedParser.mockReset();
+  mockedBalanceteParser.mockReset();
+});
 
 describe('GET /contabil/plano-contas', () => {
   it('exige client_id', async () => {
@@ -197,5 +226,169 @@ describe('históricos padrão', () => {
     const { app } = appWith(() => ({ data: null, error: null, count: 0 }));
     const res = await request(app).delete('/contabil/historicos/h1');
     expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /contabil/balancete/importar', () => {
+  it('exige arquivo', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).post('/contabil/balancete/importar').field('client_id', CID);
+    expect(res.status).toBe(400);
+  });
+
+  it('404 quando o cliente não existe', async () => {
+    mockedBalanceteParser.mockResolvedValue({ periodo: { ano: 2026, mes: 6 }, items: [], warnings: [] });
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app)
+      .post('/contabil/balancete/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
+    expect(res.status).toBe(404);
+  });
+
+  it('400 quando o balancete não tem contas', async () => {
+    mockedBalanceteParser.mockResolvedValue({ periodo: { ano: 2026, mes: 6 }, items: [], warnings: [] });
+    const { app } = appWith((op) =>
+      op.table === 'clients' ? { data: { id: CID }, error: null } : { data: null, error: null },
+    );
+    const res = await request(app)
+      .post('/contabil/balancete/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
+    expect(res.status).toBe(400);
+  });
+
+  it('lê o PDF, fecha o período e grava saldos linkando por código (upsert)', async () => {
+    mockedBalanceteParser.mockResolvedValue({
+      periodo: { ano: 2026, mes: 6 },
+      items: [
+        {
+          codigo: '1',
+          nome: 'ATIVO',
+          tipo: 'S',
+          saldo_anterior_cents: 100,
+          saldo_anterior_natureza: 'D',
+          debito_cents: 0,
+          credito_cents: 0,
+          saldo_atual_cents: 100,
+          saldo_atual_natureza: 'D',
+        },
+      ],
+      warnings: [],
+    });
+
+    let saldoSelectCalls = 0;
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'plano_contas') return { data: [{ id: 'pc-1', codigo: '1', tipo: 'S' }], error: null };
+      if (op.table === 'saldos_contabeis' && op.verb === 'select') {
+        saldoSelectCalls++;
+        return { data: saldoSelectCalls === 1 ? [] : [saldoSample], error: null }; // 1ª: nada existente; 2ª: releitura
+      }
+      return { data: null, error: null };
+    });
+
+    const res = await request(app)
+      .post('/contabil/balancete/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
+
+    expect(res.status).toBe(201);
+    expect(res.body.criadas).toBe(1);
+    expect(res.body.atualizadas).toBe(0);
+    expect(res.body.periodo).toMatchObject({ ano: 2026, mes: 6, status: 'fechado' });
+    expect(res.body.saldos).toHaveLength(1);
+    expect(res.body.warnings).toEqual([]);
+
+    const periodoUpsert = ops.find((o) => o.table === 'periodos_contabeis' && o.verb === 'upsert');
+    expect(periodoUpsert?.onConflict).toBe('client_id,ano,mes');
+    expect(periodoUpsert?.payload).toMatchObject({ ano: 2026, mes: 6, status: 'fechado' });
+
+    const saldoUpsert = ops.find((o) => o.table === 'saldos_contabeis' && o.verb === 'upsert');
+    expect(saldoUpsert?.onConflict).toBe('periodo_id,codigo');
+    const payload = saldoUpsert?.payload as Array<Record<string, unknown>>;
+    expect(payload[0]).toMatchObject({ codigo: '1', plano_conta_id: 'pc-1', ordem: 0 });
+  });
+
+  it('conta do balancete não encontrada no plano de contas: salva sem vínculo e avisa (caso real: código 10298)', async () => {
+    mockedBalanceteParser.mockResolvedValue({
+      periodo: { ano: 2026, mes: 6 },
+      items: [
+        {
+          codigo: '10298',
+          nome: 'ESCRITORIO INTELIGENTE DESENVOLVIMENTOS, COMERCIO E SERVICOS EM INFORMATICA LTDA',
+          tipo: 'A',
+          saldo_anterior_cents: 0,
+          saldo_anterior_natureza: null,
+          debito_cents: 81290,
+          credito_cents: 81290,
+          saldo_atual_cents: 0,
+          saldo_atual_natureza: null,
+        },
+      ],
+      warnings: [],
+    });
+
+    let saldoSelectCalls = 0;
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'plano_contas') return { data: [], error: null }; // 10298 não está cadastrado
+      if (op.table === 'saldos_contabeis' && op.verb === 'select') {
+        saldoSelectCalls++;
+        return {
+          data: saldoSelectCalls === 1 ? [] : [{ ...saldoSample, codigo: '10298', plano_conta_id: null }],
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+
+    const res = await request(app)
+      .post('/contabil/balancete/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
+
+    expect(res.status).toBe(201);
+    expect(
+      res.body.warnings.some((w: string) => w.includes('10298') && w.includes('não encontrada no plano de contas')),
+    ).toBe(true);
+
+    const saldoUpsert = ops.find((o) => o.table === 'saldos_contabeis' && o.verb === 'upsert');
+    const payload = saldoUpsert?.payload as Array<Record<string, unknown>>;
+    expect(payload[0]).toMatchObject({ codigo: '10298', plano_conta_id: null });
+  });
+});
+
+describe('GET /contabil/periodos', () => {
+  it('exige client_id', async () => {
+    const { app } = appWith(() => ({ data: [], error: null }));
+    const res = await request(app).get('/contabil/periodos');
+    expect(res.status).toBe(400);
+  });
+
+  it('lista períodos do cliente', async () => {
+    const { app, ops } = appWith(() => ({ data: [periodoSample], error: null }));
+    const res = await request(app).get(`/contabil/periodos?client_id=${CID}`);
+    expect(res.status).toBe(200);
+    expect(res.body.periodos).toHaveLength(1);
+    expect(ops[0]?.filters).toContainEqual(['client_id', CID]);
+  });
+});
+
+describe('GET /contabil/saldos', () => {
+  it('exige periodo_id', async () => {
+    const { app } = appWith(() => ({ data: [], error: null }));
+    const res = await request(app).get('/contabil/saldos');
+    expect(res.status).toBe(400);
+  });
+
+  it('lista saldos do período, ordenado por ordem', async () => {
+    const { app, ops } = appWith(() => ({ data: [saldoSample], error: null }));
+    const res = await request(app).get(`/contabil/saldos?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(200);
+    expect(res.body.saldos).toHaveLength(1);
+    expect(ops[0]).toMatchObject({ orderBy: 'ordem' });
   });
 });

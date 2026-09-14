@@ -87,6 +87,26 @@ def to_cents(amount: Decimal) -> int:
     return int((abs(amount) * 100).quantize(Decimal("1")))
 
 
+# pdfplumber às vezes não consegue mapear um glifo específico da fonte do PDF
+# (visto na prática numa letra acentuada) e o resultado varia entre chamadas —
+# ora um replacement char solto, ora uma sequência tipo mojibake — não é um
+# padrão fixo pra "limpar" com confiança. Em vez de adivinhar e arriscar trocar
+# pelo caractere errado, só sinaliza pra conferência manual quando o nome tem
+# algo fora do esperado (letra/dígito/espaço/pontuação comum), sem alterar o
+# dado bruto extraído. Compartilhado entre os parsers do módulo Contábil
+# (plano de contas e balancete) que leem nome de conta de PDF do Domínio.
+_UNEXPECTED_CHAR_RE = re.compile(r"[^\w\s.,/&()'-]", re.UNICODE)
+
+
+def warn_if_unexpected_char(codigo: str, nome: str) -> str | None:
+    if _UNEXPECTED_CHAR_RE.search(nome):
+        return (
+            f"nome da conta {codigo} pode estar com caractere corrompido pelo leitor de PDF "
+            f'(provavelmente uma letra acentuada) — confira: "{nome}"'
+        )
+    return None
+
+
 DEBIT_HINTS = {"d", "debito", "débito", "debit", "saida", "saída", "-"}
 CREDIT_HINTS = {"c", "credito", "crédito", "credit", "entrada", "+"}
 

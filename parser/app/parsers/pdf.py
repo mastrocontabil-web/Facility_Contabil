@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 
@@ -63,17 +64,19 @@ _MONEY_TOKEN_RE = re.compile(
 )
 
 
-def extract_pdf_text(content: bytes, password: str | None) -> str:
-    """Extrai texto de PDF (com senha); compartilhado com os parsers do módulo Contábil."""
+@contextmanager
+def open_pdf(content: bytes, password: str | None):
+    """Abre um PDF (com senha) traduzindo erros de leitura/senha; compartilhado
+    com os parsers do módulo Contábil. O `yield` fica dentro do try/except, então
+    uma exceção lançada pelo código chamador (durante a extração de uma página,
+    por exemplo) também é capturada e traduzida aqui — mesma cobertura de erro
+    de quando o open+extração inteiros viviam num try/except só."""
     import pdfplumber
     from pdfminer.pdfdocument import PDFPasswordIncorrect
 
     try:
         with pdfplumber.open(io.BytesIO(content), password=password or "") as pdf:
-            parts = []
-            for p in pdf.pages:
-                parts.append(p.extract_text(layout=True) or p.extract_text() or "")
-            return "\n".join(parts)
+            yield pdf
     except PDFPasswordIncorrect as e:
         raise EncryptedPdfError(
             "PDF protegido por senha. Informe a senha do extrato, ou mande em OFX/CSV."
@@ -85,6 +88,15 @@ def extract_pdf_text(content: bytes, password: str | None) -> str:
                 "PDF protegido por senha. Informe a senha do extrato, ou mande em OFX/CSV."
             ) from e
         raise UnreadablePdfError(f"não consegui ler o PDF: {e}") from e
+
+
+def extract_pdf_text(content: bytes, password: str | None) -> str:
+    """Extrai texto de PDF (com senha); compartilhado com os parsers do módulo Contábil."""
+    with open_pdf(content, password) as pdf:
+        parts = []
+        for p in pdf.pages:
+            parts.append(p.extract_text(layout=True) or p.extract_text() or "")
+        return "\n".join(parts)
 
 
 def _period(text: str, seen: list[date]) -> tuple[date | None, date | None]:

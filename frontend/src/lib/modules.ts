@@ -50,6 +50,7 @@ export const MODULES: ModuleDef[] = [
     nav: [
       { to: '/contabil/plano-de-contas', label: 'Plano de contas' },
       { to: '/contabil/historicos', label: 'Históricos padrão' },
+      { to: '/contabil/balancete', label: 'Importar balancete' },
     ],
   },
 ];
