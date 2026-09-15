@@ -1,17 +1,24 @@
 # Facility Contábil
 
 Web app para transformar **extrato bancário** (PDF/OFX/CSV/XLS/XLSX) em **arquivo de
-importação de lançamentos contábeis em lote** no **Leiaute Domínio Sistemas**.
+importação de lançamentos contábeis em lote** no **Leiaute Domínio Sistemas** — e,
+desde o módulo Contábil, também fazer a **escrituração contábil em partida dobrada**
+por dentro do próprio sistema (plano de contas, lançamentos, saldos e relatórios).
 
-Depois do login cai num **hub** com três módulos:
+Depois do login cai num **hub** com quatro módulos:
 
 - **Cadastros** — clientes: código no Domínio, conta contábil do banco, códigos
   de histórico padrão e o **saldo inicial da conta bancária**.
-- **Importação** — o fluxo contábil de ponta a ponta (abaixo).
+- **Importação** — o fluxo contábil de ponta a ponta a partir do extrato bancário
+  (abaixo).
 - **Classificação** — categoriza os lançamentos do extrato por tipo de despesa/
   receita (água, energia, recebimento de clientes…) **antes** de virar
   contabilidade; serve pra quem quer separar "o que aconteceu no extrato" de
   "qual conta contábil isso vira".
+- **Contábil** — plano de contas, históricos padrão, importar balancete,
+  lançamento manual em partida dobrada, cálculo automático de saldo por
+  período e relatórios (Balancete, DRE, Razão, Livro Diário) com exportação
+  em PDF de verdade (abaixo).
 
 ## Fluxo — Importação
 
@@ -47,13 +54,40 @@ Depois do login cai num **hub** com três módulos:
    códigos de histórico e o lote, e o mesmo registro segue pro fluxo normal de
    Revisão/exportação (sem duplicar o extrato).
 
+## Fluxo — Contábil
+
+1. **Plano de contas**: importa o PDF "Plano de Contas" do Domínio (ou cadastra
+   conta por conta na tela) — a hierarquia sintética/analítica é montada
+   automaticamente a partir da classificação. Catálogo de **históricos
+   padrão** (código + descrição) fica à parte, reaproveitado em qualquer
+   lançamento.
+2. **Importar balancete**: sobe o PDF "Balancete" do Domínio — grava o saldo de
+   cada conta naquele mês, vinculando por código ao plano de contas, e
+   **fecha o período** (vira autoridade: nada recalcula por cima dele depois).
+3. **Lançamentos**: lança manualmente em partida dobrada (um débito e um
+   crédito, ou múltiplos) — o período do mês da data lançada **abre sozinho**;
+   não dá pra lançar num período já fechado. Editar ou excluir um lançamento
+   recalcula o saldo das contas afetadas na hora (inclusive as sintéticas, por
+   soma dos filhos).
+4. **Relatórios**, todos com botão **Exportar PDF** (gerado de verdade no
+   backend, não é print da tela):
+   - **Balancete** — saldo de cada conta no período selecionado.
+   - **DRE** — receitas, despesas e o resultado do mês e do exercício.
+   - **Razão** — livro-razão de uma conta: saldo anterior, cada movimento em
+     ordem cronológica com saldo corrente, saldo atual.
+   - **Livro Diário** — lista cronológica de todos os lançamentos do período.
+
+   Período **fechado** (importado via Balancete) não tem lançamento manual por
+   definição — Razão e Livro Diário avisam isso na tela em vez de fingir que o
+   número mostrado é a escrituração completa do mês.
+
 ## Serviços
 
 | Pasta       | Stack                       | Porta | Papel |
 |-------------|-----------------------------|-------|-------|
 | `frontend/` | React + Vite + TS + Tailwind | 5173 | SPA |
-| `backend/`  | Node + Express + TS          | 8080 | API, memória de classificação, geração do arquivo Domínio |
-| `parser/`   | Python + FastAPI             | 8100 | leitura dos extratos → JSON normalizado |
+| `backend/`  | Node + Express + TS          | 8080 | API, memória de classificação, geração do arquivo Domínio, motor de saldos contábeis |
+| `parser/`   | Python + FastAPI             | 8100 | leitura dos extratos/PDFs contábeis → JSON normalizado; geração dos PDFs dos relatórios (reportlab) |
 | `supabase/` | migrations SQL + RLS         | —    | Postgres, Auth, Storage (projeto cloud) |
 
 O frontend só fala com o `backend`. O `backend` chama o `parser` (protegido por
@@ -127,7 +161,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **122 testes no backend**, **26 no parser**.
+Hoje: **221 testes no backend**, **53 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -140,7 +174,7 @@ caminho não existe (não quebra em outra máquina).
 - [`docs/supabase-setup.md`](docs/supabase-setup.md) — criar o projeto Supabase
 - [`docs/leiaute-dominio.md`](docs/leiaute-dominio.md) — o formato do arquivo gerado
 - [`docs/arquitetura.md`](docs/arquitetura.md) — visão geral
-- [`docs/roadmap.md`](docs/roadmap.md) — milestones
+- [`docs/roadmap.md`](docs/roadmap.md) — milestones (módulos de Importação/Classificação — o módulo Contábil ainda não está lá, ver "Estado atual" abaixo)
 
 ## Estado atual
 
@@ -164,7 +198,7 @@ caminho não existe (não quebra em outra máquina).
 - **7** — **reimportar** um extrato (troca o arquivo sem recadastrar), histórico
   com filtro por cliente/status e exclusão em massa, polimento de UX
   (responsivo, aviso antes de sair da revisão sem salvar).
-- **9** — rebrand pra **Facility Contábil** + tela de **hub** com os 3 módulos.
+- **9** — rebrand pra **Facility Contábil** + tela de **hub** com os módulos.
   Módulo **Classificação** novo: importa o extrato e categoriza cada
   lançamento por tipo de despesa/receita (catálogo por cliente, criado na
   hora), independente da conta contábil; extrato classificado é **puxado** pra
@@ -173,7 +207,36 @@ caminho não existe (não quebra em outra máquina).
   classificação" e "extrato + complemento + classificação". Classificação em
   uso não pode ser excluída (só desativada).
 
-**Próximo: Milestone 8** — deploy (hospedar de verdade, fora do `localhost`).
+**Módulo Contábil (novo, roadmap próprio C1–C11, C1–C6 entregues):**
+
+- **C1** — plano de contas: importa o PDF "Plano de Contas" do Domínio ou
+  cadastra manualmente; hierarquia sintética/analítica calculada a partir da
+  classificação (`parent_id`, religado via RPC a cada import/edição). Catálogo
+  de históricos padrão.
+- **C2** — importar balancete: lê o PDF "Balancete" do Domínio, grava o saldo
+  de cada conta no período (fecha o mês), vincula por código ao plano de
+  contas; conta sem correspondência entra sem vínculo (com aviso) em vez de
+  travar a importação.
+- **C3** — lançamento manual em partida dobrada (simples ou múltipla); o
+  período abre sozinho no mês da data lançada, nunca lança num período já
+  fechado.
+- **C4** — motor que recalcula o saldo de toda conta (inclusive sintética, por
+  rollup dos filhos) sempre que um lançamento entra num período aberto.
+  Ancora sempre no último período fechado e recalcula o trecho aberto inteiro
+  a partir dali; nunca sobrescreve um período fechado (Balancete é
+  autoridade).
+- **C5** — relatório Balancete e DRE (identifica receita/despesa pelo padrão de
+  nomes do Domínio). Primeira geração de PDF de verdade do sistema: o parser
+  (Python + reportlab) monta os bytes, o backend busca o dado e devolve pro
+  navegador — verificado ao vivo, DRE bate cent-a-cent com o Resumo do
+  Balancete do Domínio.
+- **C6** — relatório Razão (saldo anterior + cada movimento cronológico com
+  saldo corrente, por conta analítica) e Livro Diário (lista cronológica de
+  lançamentos), os dois com exportação em PDF.
+
+**Próximo:** Milestone 8 (deploy) e, no módulo Contábil, C7–C11 (exportar o mês
+pro Domínio com partida múltipla, importar lançamentos a partir do módulo
+Importação, lançamentos recorrentes, fechamento de período, acabamento).
 
 ## Uso no dia a dia
 
