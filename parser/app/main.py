@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from .config import MAX_UPLOAD_BYTES
@@ -15,7 +15,19 @@ from .parsers import (
     parse_statement,
 )
 from .parsers.pdf import UnreadablePdfError
-from .schemas import BalanceteParseResult, ParseResult, PlanoContasParseResult
+from .reports.balancete_pdf import build_balancete_pdf
+from .reports.dre_pdf import build_dre_pdf
+from .reports.livro_diario_pdf import build_livro_diario_pdf
+from .reports.razao_pdf import build_razao_pdf
+from .schemas import (
+    BalancetePdfRequest,
+    BalanceteParseResult,
+    DrePdfRequest,
+    LivroDiarioPdfRequest,
+    ParseResult,
+    PlanoContasParseResult,
+    RazaoPdfRequest,
+)
 from .security import require_shared_secret
 
 logging.basicConfig(level=logging.INFO)
@@ -125,3 +137,43 @@ async def parse_balancete(
         filename, result.periodo.mes, result.periodo.ano, len(result.items),
     )
     return result
+
+
+@app.post("/gerar/balancete-pdf", dependencies=[Depends(require_shared_secret)])
+async def gerar_balancete_pdf(payload: BalancetePdfRequest) -> Response:
+    pdf = build_balancete_pdf(payload)
+    logger.info(
+        "gerar balancete-pdf ok: período=%02d/%d contas=%d bytes=%d",
+        payload.periodo.mes, payload.periodo.ano, len(payload.linhas), len(pdf),
+    )
+    return Response(content=pdf, media_type="application/pdf")
+
+
+@app.post("/gerar/dre-pdf", dependencies=[Depends(require_shared_secret)])
+async def gerar_dre_pdf(payload: DrePdfRequest) -> Response:
+    pdf = build_dre_pdf(payload)
+    logger.info(
+        "gerar dre-pdf ok: período=%02d/%d bytes=%d",
+        payload.periodo.mes, payload.periodo.ano, len(pdf),
+    )
+    return Response(content=pdf, media_type="application/pdf")
+
+
+@app.post("/gerar/razao-pdf", dependencies=[Depends(require_shared_secret)])
+async def gerar_razao_pdf(payload: RazaoPdfRequest) -> Response:
+    pdf = build_razao_pdf(payload)
+    logger.info(
+        "gerar razao-pdf ok: conta=%s período=%02d/%d linhas=%d bytes=%d",
+        payload.conta.codigo, payload.periodo.mes, payload.periodo.ano, len(payload.linhas), len(pdf),
+    )
+    return Response(content=pdf, media_type="application/pdf")
+
+
+@app.post("/gerar/livro-diario-pdf", dependencies=[Depends(require_shared_secret)])
+async def gerar_livro_diario_pdf(payload: LivroDiarioPdfRequest) -> Response:
+    pdf = build_livro_diario_pdf(payload)
+    logger.info(
+        "gerar livro-diario-pdf ok: período=%02d/%d lancamentos=%d bytes=%d",
+        payload.periodo.mes, payload.periodo.ano, len(payload.lancamentos), len(pdf),
+    )
+    return Response(content=pdf, media_type="application/pdf")

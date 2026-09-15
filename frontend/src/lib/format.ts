@@ -25,3 +25,26 @@ export function formatMoney(cents: number): string {
 export function formatCompetencia(ano: number, mes: number): string {
   return `${String(mes).padStart(2, '0')}/${ano}`;
 }
+
+/**
+ * "1.234,56" → 123456 (centavos). Mesma ambiguidade de "só ponto" do
+ * parseMoney de ImportPage.tsx (resolve pelo nº de dígitos depois do
+ * último ponto) — só que devolve centavos (int), não reais (float), porque
+ * as tabelas do módulo Contábil guardam _cents em vez de numeric.
+ */
+export function parseMoneyToCents(s: string): number {
+  const v = s.trim();
+  let reais: number;
+  if (v.includes(',')) {
+    reais = Number(v.replace(/\./g, '').replace(',', '.')) || 0;
+  } else {
+    const pontos = v.split('.').length - 1;
+    const casasFinais = pontos > 0 ? v.length - v.lastIndexOf('.') - 1 : 0;
+    reais = pontos > 0 && (pontos > 1 || casasFinais === 3) ? Number(v.replace(/\./g, '')) || 0 : Number(v) || 0;
+  }
+  return Math.round(reais * 100);
+}
+
+export function centsToMoneyInput(cents: number): string {
+  return (cents / 100).toFixed(2).replace('.', ',');
+}

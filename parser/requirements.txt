@@ -12,6 +12,9 @@ openpyxl==3.1.5
 xlrd==2.0.1
 pandas==2.2.3
 
+# geração de PDF (relatórios contábeis)
+reportlab==5.0.1
+
 # dev / testes
 pytest==8.3.4
 httpx==0.28.1

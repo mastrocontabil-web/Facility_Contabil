@@ -59,7 +59,58 @@ export const saldosListQuerySchema = z.object({
   periodo_id: z.string().uuid(),
 });
 
+const partidaSchema = z.object({
+  plano_conta_id: z.string().uuid(),
+  tipo: z.enum(['D', 'C']),
+  valor_cents: z.coerce.number().int().positive(),
+});
+
+function partidasBalanceadas(partidas: { tipo: 'D' | 'C'; valor_cents: number }[]): boolean {
+  const d = partidas.filter((p) => p.tipo === 'D').reduce((s, p) => s + p.valor_cents, 0);
+  const c = partidas.filter((p) => p.tipo === 'C').reduce((s, p) => s + p.valor_cents, 0);
+  return d === c && d > 0;
+}
+
+const lancamentoBaseSchema = z.object({
+  client_id: z.string().uuid(),
+  data: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data inválida (esperado YYYY-MM-DD)'),
+  historico_codigo: codigoHistorico.optional().nullable(),
+  historico_complemento: z.string().trim().min(1, 'histórico obrigatório').max(500),
+  partidas: z.array(partidaSchema).min(2, 'precisa de pelo menos 1 débito e 1 crédito'),
+});
+
+const balancoRefinement = {
+  message: 'soma dos débitos precisa ser igual à soma dos créditos',
+  path: ['partidas'],
+};
+
+export const lancamentoCreateSchema = lancamentoBaseSchema.refine(
+  (d) => partidasBalanceadas(d.partidas),
+  balancoRefinement,
+);
+
+// Não é .partial(): PATCH sempre manda o conjunto completo de partidas
+// (apaga tudo e recria), então não existe "atualização parcial" aqui.
+export const lancamentoUpdateSchema = lancamentoBaseSchema
+  .omit({ client_id: true })
+  .refine((d) => partidasBalanceadas(d.partidas), balancoRefinement);
+
+export const lancamentosListQuerySchema = z.object({
+  periodo_id: z.string().uuid(),
+});
+
+export const recalcularSaldosSchema = z.object({
+  periodo_id: z.string().uuid(),
+});
+
+export const razaoQuerySchema = z.object({
+  periodo_id: z.string().uuid(),
+  plano_conta_id: z.string().uuid(),
+});
+
 export type PlanoContaCreate = z.infer<typeof planoContaCreateSchema>;
 export type PlanoContaUpdate = z.infer<typeof planoContaUpdateSchema>;
 export type HistoricoPadraoCreate = z.infer<typeof historicoPadraoCreateSchema>;
 export type HistoricoPadraoUpdate = z.infer<typeof historicoPadraoUpdateSchema>;
+export type LancamentoCreate = z.infer<typeof lancamentoCreateSchema>;
+export type LancamentoUpdate = z.infer<typeof lancamentoUpdateSchema>;

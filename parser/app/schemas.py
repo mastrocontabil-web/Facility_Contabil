@@ -73,3 +73,79 @@ class BalanceteParseResult(BaseModel):
     periodo: BalancetePeriodo
     items: list[BalanceteContaItem] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class RelatorioCliente(BaseModel):
+    razao_social: str
+    cnpj: str
+
+
+class ResultadoFigura(BaseModel):
+    cents: int = Field(ge=0)
+    natureza: NaturezaDC | None = None
+
+
+class BalancetePdfRequest(BaseModel):
+    cliente: RelatorioCliente
+    periodo: BalancetePeriodo
+    linhas: list[BalanceteContaItem] = Field(default_factory=list)
+
+
+class GrupoDre(BaseModel):
+    raiz: BalanceteContaItem
+    linhas: list[BalanceteContaItem] = Field(default_factory=list)
+
+
+class DrePdfRequest(BaseModel):
+    cliente: RelatorioCliente
+    periodo: BalancetePeriodo
+    receitas: GrupoDre
+    despesas: GrupoDre
+    resultado_mes: ResultadoFigura
+    resultado_exercicio: ResultadoFigura
+
+
+class RazaoContaInfo(BaseModel):
+    codigo: str
+    nome: str
+
+
+class RazaoLinha(BaseModel):
+    data: str
+    historico_codigo: str | None = None
+    historico_complemento: str
+    tipo: NaturezaDC
+    valor_cents: int = Field(gt=0)
+    saldo_cents: int = Field(ge=0)
+    saldo_natureza: NaturezaDC | None = None
+
+
+class RazaoPdfRequest(BaseModel):
+    cliente: RelatorioCliente
+    periodo: BalancetePeriodo
+    conta: RazaoContaInfo
+    saldo_anterior_cents: int = Field(ge=0)
+    saldo_anterior_natureza: NaturezaDC | None = None
+    linhas: list[RazaoLinha] = Field(default_factory=list)
+    saldo_atual_cents: int = Field(ge=0)
+    saldo_atual_natureza: NaturezaDC | None = None
+
+
+class LivroDiarioPartida(BaseModel):
+    conta_codigo: str
+    conta_nome: str
+    tipo: NaturezaDC
+    valor_cents: int = Field(gt=0)
+
+
+class LivroDiarioLancamento(BaseModel):
+    data: str
+    historico_codigo: str | None = None
+    historico_complemento: str
+    partidas: list[LivroDiarioPartida] = Field(default_factory=list)
+
+
+class LivroDiarioPdfRequest(BaseModel):
+    cliente: RelatorioCliente
+    periodo: BalancetePeriodo
+    lancamentos: list[LivroDiarioLancamento] = Field(default_factory=list)

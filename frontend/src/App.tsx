@@ -15,6 +15,11 @@ import { CategoriasPage } from '@/features/classificacao/CategoriasPage';
 import { PlanoContasPage } from '@/features/contabil/PlanoContasPage';
 import { HistoricosPadraoPage } from '@/features/contabil/HistoricosPadraoPage';
 import { BalancetePage } from '@/features/contabil/BalancetePage';
+import { LancamentosPage } from '@/features/contabil/LancamentosPage';
+import { RelatorioBalancetePage } from '@/features/contabil/RelatorioBalancetePage';
+import { RelatorioDrePage } from '@/features/contabil/RelatorioDrePage';
+import { RelatorioRazaoPage } from '@/features/contabil/RelatorioRazaoPage';
+import { RelatorioLivroDiarioPage } from '@/features/contabil/RelatorioLivroDiarioPage';
 
 export function App() {
   return (
@@ -40,6 +45,11 @@ export function App() {
         <Route path="/contabil/plano-de-contas" element={<PlanoContasPage />} />
         <Route path="/contabil/historicos" element={<HistoricosPadraoPage />} />
         <Route path="/contabil/balancete" element={<BalancetePage />} />
+        <Route path="/contabil/lancamentos" element={<LancamentosPage />} />
+        <Route path="/contabil/relatorios/balancete" element={<RelatorioBalancetePage />} />
+        <Route path="/contabil/relatorios/dre" element={<RelatorioDrePage />} />
+        <Route path="/contabil/relatorios/razao" element={<RelatorioRazaoPage />} />
+        <Route path="/contabil/relatorios/livro-diario" element={<RelatorioLivroDiarioPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

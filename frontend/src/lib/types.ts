@@ -150,6 +150,59 @@ export type SaldoContabil = {
   updated_at: string;
 };
 
+export type LancamentoPartida = {
+  id: string;
+  plano_conta_id: string;
+  tipo: NaturezaDC;
+  valor_cents: number;
+  ordem: number;
+  plano_conta?: Pick<PlanoConta, 'codigo' | 'nome'> | null;
+};
+
+export type Lancamento = {
+  id: string;
+  periodo_id: string;
+  data: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  partidas: LancamentoPartida[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrupoDre = { raiz: SaldoContabil; linhas: SaldoContabil[] };
+
+export type DreRelatorio = {
+  periodo: PeriodoContabil;
+  receitas: GrupoDre;
+  despesas: GrupoDre;
+  resultado_mes_cents: number;
+  resultado_mes_natureza: NaturezaDC | null;
+  resultado_exercicio_cents: number;
+  resultado_exercicio_natureza: NaturezaDC | null;
+};
+
+export type RazaoLinha = {
+  lancamento_id: string;
+  data: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  tipo: NaturezaDC;
+  valor_cents: number;
+  saldo_cents: number;
+  saldo_natureza: NaturezaDC | null;
+};
+
+export type RazaoRelatorio = {
+  periodo: PeriodoContabil;
+  conta: { codigo: string; nome: string };
+  saldo_anterior_cents: number;
+  saldo_anterior_natureza: NaturezaDC | null;
+  linhas: RazaoLinha[];
+  saldo_atual_cents: number;
+  saldo_atual_natureza: NaturezaDC | null;
+};
+
 export type MatchType = 'contains' | 'starts_with' | 'regex' | 'exact';
 
 export type MappingRule = {

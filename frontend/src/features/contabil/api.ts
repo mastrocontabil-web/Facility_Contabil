@@ -1,6 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
-import type { HistoricoPadrao, PeriodoContabil, PlanoConta, SaldoContabil } from '@/lib/types';
+import { api, apiDownload, saveBlob } from '@/lib/api';
+import type {
+  DreRelatorio,
+  HistoricoPadrao,
+  Lancamento,
+  NaturezaDC,
+  PeriodoContabil,
+  PlanoConta,
+  RazaoRelatorio,
+  SaldoContabil,
+} from '@/lib/types';
 
 export function usePlanoContas(clientId: string | undefined) {
   return useQuery({
@@ -159,5 +168,120 @@ export function useSaldos(periodoId: string | undefined) {
     queryFn: () => api<{ saldos: SaldoContabil[] }>(`/api/contabil/saldos?periodo_id=${periodoId}`),
     select: (d) => d.saldos,
     enabled: !!periodoId,
+  });
+}
+
+export function useLancamentos(periodoId: string | undefined) {
+  return useQuery({
+    queryKey: ['lancamentos', periodoId],
+    queryFn: () => api<{ lancamentos: Lancamento[] }>(`/api/contabil/lancamentos?periodo_id=${periodoId}`),
+    select: (d) => d.lancamentos,
+    enabled: !!periodoId,
+  });
+}
+
+export type LancamentoPartidaInput = { plano_conta_id: string; tipo: NaturezaDC; valor_cents: number };
+
+export type LancamentoInput = {
+  client_id: string;
+  data: string;
+  historico_codigo?: string | null;
+  historico_complemento: string;
+  partidas: LancamentoPartidaInput[];
+};
+
+export function useCreateLancamento(periodoId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: LancamentoInput) =>
+      api<{ lancamento: Lancamento }>('/api/contabil/lancamentos', { method: 'POST', body: input }),
+    onSuccess: (data, vars) => {
+      qc.invalidateQueries({ queryKey: ['lancamentos', data.lancamento.periodo_id] });
+      if (periodoId) qc.invalidateQueries({ queryKey: ['lancamentos', periodoId] });
+      // pode ter aberto um período novo (mês sem período ainda) — atualiza o seletor.
+      qc.invalidateQueries({ queryKey: ['periodos', vars.client_id] });
+    },
+  });
+}
+
+export function useUpdateLancamento(periodoId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: Omit<LancamentoInput, 'client_id'> }) =>
+      api<{ lancamento: Lancamento }>(`/api/contabil/lancamentos/${id}`, { method: 'PATCH', body: input }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['lancamentos', data.lancamento.periodo_id] });
+      if (periodoId) qc.invalidateQueries({ queryKey: ['lancamentos', periodoId] });
+      // edição pode ter mudado a data pra um mês sem período ainda — não sabemos o
+      // client_id aqui (PATCH não manda), então invalida todo mundo (raro, barato).
+      qc.invalidateQueries({ queryKey: ['periodos'] });
+    },
+  });
+}
+
+export function useDeleteLancamento(periodoId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/contabil/lancamentos/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['lancamentos', periodoId] }),
+  });
+}
+
+export function useDre(periodoId: string | undefined) {
+  return useQuery({
+    queryKey: ['dre', periodoId],
+    queryFn: () => api<DreRelatorio>(`/api/contabil/relatorios/dre?periodo_id=${periodoId}`),
+    enabled: !!periodoId,
+  });
+}
+
+export function useExportarBalancetePdf() {
+  return useMutation({
+    mutationFn: async (periodoId: string) => {
+      const { blob, filename } = await apiDownload(`/api/contabil/relatorios/balancete/pdf?periodo_id=${periodoId}`);
+      saveBlob(blob, filename);
+    },
+  });
+}
+
+export function useExportarDrePdf() {
+  return useMutation({
+    mutationFn: async (periodoId: string) => {
+      const { blob, filename } = await apiDownload(`/api/contabil/relatorios/dre/pdf?periodo_id=${periodoId}`);
+      saveBlob(blob, filename);
+    },
+  });
+}
+
+export function useRazao(periodoId: string | undefined, planoContaId: string | undefined) {
+  return useQuery({
+    queryKey: ['razao', periodoId, planoContaId],
+    queryFn: () =>
+      api<RazaoRelatorio>(
+        `/api/contabil/relatorios/razao?periodo_id=${periodoId}&plano_conta_id=${planoContaId}`,
+      ),
+    enabled: !!periodoId && !!planoContaId,
+  });
+}
+
+export function useExportarRazaoPdf() {
+  return useMutation({
+    mutationFn: async ({ periodoId, planoContaId }: { periodoId: string; planoContaId: string }) => {
+      const { blob, filename } = await apiDownload(
+        `/api/contabil/relatorios/razao/pdf?periodo_id=${periodoId}&plano_conta_id=${planoContaId}`,
+      );
+      saveBlob(blob, filename);
+    },
+  });
+}
+
+export function useExportarLivroDiarioPdf() {
+  return useMutation({
+    mutationFn: async (periodoId: string) => {
+      const { blob, filename } = await apiDownload(
+        `/api/contabil/relatorios/livro-diario/pdf?periodo_id=${periodoId}`,
+      );
+      saveBlob(blob, filename);
+    },
   });
 }

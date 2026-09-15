@@ -7,9 +7,12 @@ export type FakeOp = {
   payload?: unknown;
   single?: 'single' | 'maybeSingle' | null;
   orderBy?: string;
+  /** Todas as chamadas de .order() encadeadas, em ordem (orderBy acima só guarda a última). */
+  orderCalls: Array<{ col: string; foreignTable?: string; ascending?: boolean }>;
   limit?: number;
   or?: string;
   onConflict?: string;
+  ignoreDuplicates?: boolean;
 };
 
 export type FakeResult = { data?: unknown; error?: unknown; count?: number | null };
@@ -61,10 +64,11 @@ export function makeFakeSupabase(
         op.payload = payload;
         return builder;
       },
-      upsert(payload: unknown, opts?: { onConflict?: string }) {
+      upsert(payload: unknown, opts?: { onConflict?: string; ignoreDuplicates?: boolean }) {
         op.verb = 'upsert';
         op.payload = payload;
         if (opts?.onConflict) op.onConflict = opts.onConflict;
+        if (opts?.ignoreDuplicates) op.ignoreDuplicates = true;
         return builder;
       },
       update(payload: unknown) {
@@ -81,12 +85,17 @@ export function makeFakeSupabase(
         op.filters.push([col, val]);
         return builder;
       },
+      in(col: string, vals: unknown[]) {
+        op.filters.push([col, vals]);
+        return builder;
+      },
       or(expr: string) {
         op.or = expr;
         return builder;
       },
-      order(col: string, _opts?: { ascending?: boolean }) {
+      order(col: string, opts?: { ascending?: boolean; foreignTable?: string }) {
         op.orderBy = col;
+        op.orderCalls.push({ col, foreignTable: opts?.foreignTable, ascending: opts?.ascending });
         return builder;
       },
       limit(n: number) {
@@ -137,7 +146,7 @@ export function makeFakeSupabase(
 
   const client = {
     from(table: string) {
-      return makeBuilder({ table, verb: 'select', filters: [] });
+      return makeBuilder({ table, verb: 'select', filters: [], orderCalls: [] });
     },
     storage: { from: storageBucket },
     async rpc(fn: string, args: Record<string, unknown>) {

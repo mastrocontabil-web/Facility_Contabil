@@ -8,13 +8,28 @@ import {
   historicoPadraoUpdateSchema,
   importarBalanceteSchema,
   importarPlanoContasSchema,
+  lancamentoCreateSchema,
+  lancamentoUpdateSchema,
+  lancamentosListQuerySchema,
   periodosListQuerySchema,
   planoContaCreateSchema,
   planoContaListQuerySchema,
   planoContaUpdateSchema,
+  razaoQuerySchema,
+  recalcularSaldosSchema,
   saldosListQuerySchema,
 } from './schema.js';
-import { callBalanceteParser, callPlanoContasParser } from './parserClient.js';
+import {
+  callBalanceteParser,
+  callGerarBalancetePdf,
+  callGerarDrePdf,
+  callGerarLivroDiarioPdf,
+  callGerarRazaoPdf,
+  callPlanoContasParser,
+} from './parserClient.js';
+import { recomputeSaldosCascade } from './saldoEngine.js';
+import { montarDreRelatorio } from './dreEngine.js';
+import { montarRazao, type RazaoLinha } from './razaoEngine.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -33,6 +48,12 @@ const SALDO_COLS =
   'id, periodo_id, plano_conta_id, codigo, nome, tipo, ordem, saldo_anterior_cents, ' +
   'saldo_anterior_natureza, debito_cents, credito_cents, saldo_atual_cents, ' +
   'saldo_atual_natureza, created_at, updated_at';
+const LANC_TABLE = 'lancamentos';
+const PARTIDA_TABLE = 'lancamento_partidas';
+const LANC_COLS =
+  'id, periodo_id, data, historico_codigo, historico_complemento, created_at, updated_at, ' +
+  'partidas:lancamento_partidas(id, plano_conta_id, tipo, valor_cents, ordem, ' +
+  'plano_conta:plano_contas(codigo, nome))';
 
 export const contabilRouter = Router();
 
@@ -52,6 +73,193 @@ function db(req: { supabase?: SupabaseClient }): SupabaseClient {
 async function relinkParents(supabase: SupabaseClient, clientId: string): Promise<void> {
   const { error } = await supabase.rpc('relink_plano_contas_parents', { p_client: clientId });
   if (error) throw mapPgrstError(error, 'religar hierarquia do plano de contas');
+}
+
+/**
+ * Garante que existe um período 'aberto' pro (cliente, ano, mês) e devolve
+ * seu id/status. Nunca reabre um período já 'fechado' — o upsert usa
+ * ignoreDuplicates (DO NOTHING no conflito), então não dá pra confiar num
+ * .select() encadeado nesse insert (não retorna linha quando pula); por
+ * isso relê à parte pra saber o estado VERDADEIRO atual.
+ */
+async function resolvePeriodoAberto(
+  supabase: SupabaseClient,
+  ownerId: string,
+  clientId: string,
+  ano: number,
+  mes: number,
+): Promise<{ id: string; status: string }> {
+  const { error: upErr } = await supabase
+    .from(PERIODO_TABLE)
+    .upsert(
+      { owner_id: ownerId, client_id: clientId, ano, mes, status: 'aberto' },
+      { onConflict: 'client_id,ano,mes', ignoreDuplicates: true },
+    );
+  if (upErr) throw mapPgrstError(upErr, 'abrir período');
+
+  const { data: periodo, error: selErr } = await supabase
+    .from(PERIODO_TABLE)
+    .select('id, status')
+    .eq('client_id', clientId)
+    .eq('ano', ano)
+    .eq('mes', mes)
+    .single();
+  if (selErr) throw mapPgrstError(selErr, 'ler período');
+  if (periodo.status === 'fechado') {
+    throw badRequest('Esse período já está fechado — não é possível lançar nele.');
+  }
+  return periodo as { id: string; status: string };
+}
+
+/**
+ * Confere que toda plano_conta_id citada nas partidas existe, pertence a
+ * esse cliente, é analítica (só folha recebe lançamento — sintética é
+ * rollup) e está ativa. Sem isso, um POST direto (sem passar pelo filtro
+ * do frontend) poderia postar numa conta de outro cliente ou num grupo.
+ */
+async function assertPartidasContasValidas(
+  supabase: SupabaseClient,
+  clientId: string,
+  partidas: { plano_conta_id: string }[],
+): Promise<void> {
+  const ids = [...new Set(partidas.map((p) => p.plano_conta_id))];
+  const { data: contas, error } = await supabase
+    .from(PLANO_TABLE)
+    .select('id, client_id, tipo, ativo')
+    .in('id', ids);
+  if (error) throw mapPgrstError(error, 'validar contas do lançamento');
+  const porId = new Map((contas ?? []).map((c) => [c.id as string, c]));
+  for (const id of ids) {
+    const c = porId.get(id);
+    if (!c) throw badRequest(`Conta ${id} não encontrada.`);
+    if (c.client_id !== clientId) throw badRequest(`Conta ${id} não pertence a esse cliente.`);
+    if (c.tipo !== 'A') {
+      throw badRequest(`Conta ${id} é sintética — só contas analíticas recebem lançamento.`);
+    }
+    if (!c.ativo) throw badRequest(`Conta ${id} está inativa.`);
+  }
+}
+
+/** dto.data já vem validado pelo zod como YYYY-MM-DD (10 chars fixos). */
+function anoMesDe(data: string): [number, number] {
+  return [Number(data.slice(0, 4)), Number(data.slice(5, 7))];
+}
+
+/** Embeds do Postgrest às vezes vêm como array-de-um em vez de objeto — mesma defesa que statements/router.ts já usa. */
+function unwrapEmbed<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+type ContaItemLike = {
+  codigo: string;
+  nome: string;
+  tipo: 'S' | 'A';
+  saldo_anterior_cents: number;
+  saldo_anterior_natureza: 'D' | 'C' | null;
+  debito_cents: number;
+  credito_cents: number;
+  saldo_atual_cents: number;
+  saldo_atual_natureza: 'D' | 'C' | null;
+};
+
+/** Reduz uma linha de saldos_contabeis (ou o SaldoRow do dreEngine, mesmo
+ * formato de campos) pro shape que o parser espera — sem vazar id/ordem/timestamps. */
+function toContaItem(s: ContaItemLike): ContaItemLike {
+  return {
+    codigo: s.codigo,
+    nome: s.nome,
+    tipo: s.tipo,
+    saldo_anterior_cents: s.saldo_anterior_cents,
+    saldo_anterior_natureza: s.saldo_anterior_natureza,
+    debito_cents: s.debito_cents,
+    credito_cents: s.credito_cents,
+    saldo_atual_cents: s.saldo_atual_cents,
+    saldo_atual_natureza: s.saldo_atual_natureza,
+  };
+}
+
+/** Mesma convenção do dominio/exporter.ts: código Domínio só-dígitos entre
+ * parênteses, "mm-yyyy" — nunca formatCompetencia() (a barra "06/2026" vira
+ * separador de path no Windows ao salvar) nem razao_social (tem acento; todo
+ * outro Content-Disposition desse projeto evita texto não-ASCII). */
+function nomeArquivoRelatorio(tipo: string, dominioCode: string, ano: number, mes: number): string {
+  return `(${dominioCode}) ${tipo} ${String(mes).padStart(2, '0')}-${ano}.pdf`;
+}
+
+/** Reduz uma RazaoLinha pro shape que o parser espera — sem vazar lancamento_id. */
+function toRazaoLinha(l: RazaoLinha) {
+  return {
+    data: l.data,
+    historico_codigo: l.historico_codigo,
+    historico_complemento: l.historico_complemento,
+    tipo: l.tipo,
+    valor_cents: l.valor_cents,
+    saldo_cents: l.saldo_cents,
+    saldo_natureza: l.saldo_natureza,
+  };
+}
+
+type LivroDiarioLancamentoLike = {
+  data: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  partidas: Array<{ tipo: string; valor_cents: number; plano_conta: { codigo: string; nome: string } | null }>;
+};
+
+/** Reduz um lançamento (já normalizado — embed desembrulhado) pro shape que
+ * o parser espera — sem vazar id/plano_conta_id/ordem internos. */
+function toLivroDiarioLancamento(l: LivroDiarioLancamentoLike) {
+  return {
+    data: l.data,
+    historico_codigo: l.historico_codigo,
+    historico_complemento: l.historico_complemento,
+    partidas: l.partidas.map((p) => ({
+      conta_codigo: p.plano_conta?.codigo ?? '',
+      conta_nome: p.plano_conta?.nome ?? '',
+      tipo: p.tipo as 'D' | 'C',
+      valor_cents: p.valor_cents,
+    })),
+  };
+}
+
+async function buscarClientePraRelatorio(
+  supabase: SupabaseClient,
+  clientId: string,
+): Promise<{ razao_social: string; cnpj: string; dominio_code: string }> {
+  const { data, error } = await supabase
+    .from('clients')
+    .select('razao_social, cnpj, dominio_code')
+    .eq('id', clientId)
+    .maybeSingle();
+  if (error) throw mapPgrstError(error, 'buscar cliente pro relatório');
+  if (!data) throw notFound('Cliente não encontrado');
+  return data as { razao_social: string; cnpj: string; dominio_code: string };
+}
+
+type LancamentoRow = {
+  id: string;
+  periodo_id: string;
+  data: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  created_at: string;
+  updated_at: string;
+  partidas: Array<{
+    id: string;
+    plano_conta_id: string;
+    tipo: string;
+    valor_cents: number;
+    ordem: number;
+    plano_conta: { codigo: string; nome: string } | { codigo: string; nome: string }[] | null;
+  }> | null;
+};
+
+function normalizeLancamento(row: LancamentoRow) {
+  return {
+    ...row,
+    partidas: (row.partidas ?? []).map((p) => ({ ...p, plano_conta: unwrapEmbed(p.plano_conta) })),
+  };
 }
 
 // --------------------------------------------------------------------------- #
@@ -442,6 +650,443 @@ contabilRouter.get('/saldos', async (req, res, next) => {
       .order('ordem', { ascending: true });
     if (error) throw mapPgrstError(error, 'listar saldos');
     res.json({ saldos: data ?? [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// POST /saldos/recalcular  — roda o motor de saldos manualmente (backfill /
+// via de escape). Idempotente e independente de ordem: como o motor sempre
+// ancora no último período fechado, chamar com qualquer período de um
+// trecho aberto quebrado dá o mesmo resultado certo.
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/saldos/recalcular', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+    const userId = req.auth!.userId;
+    const { periodo_id } = recalcularSaldosSchema.parse(req.body);
+
+    await recomputeSaldosCascade(supabase, userId, periodo_id);
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select(PERIODO_COLS)
+      .eq('id', periodo_id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'reler período');
+    if (!periodo) throw notFound('Período não encontrado');
+
+    const { data: saldos, error: salErr } = await supabase
+      .from(SALDO_TABLE)
+      .select(SALDO_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('ordem', { ascending: true });
+    if (salErr) throw mapPgrstError(salErr, 'reler saldos');
+
+    res.json({ periodo, saldos: saldos ?? [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// POST /lancamentos  — lançamento manual (partida simples ou múltipla)
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/lancamentos', async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+
+  try {
+    const dto = lancamentoCreateSchema.parse(req.body);
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', dto.client_id)
+      .maybeSingle();
+    if (cErr) throw mapPgrstError(cErr, 'validar cliente');
+    if (!client) throw notFound('Cliente não encontrado');
+
+    // valida as contas ANTES de mexer em período, pra não abrir período à
+    // toa numa request que vai falhar de qualquer jeito.
+    await assertPartidasContasValidas(supabase, dto.client_id, dto.partidas);
+
+    const [ano, mes] = anoMesDe(dto.data);
+    const periodo = await resolvePeriodoAberto(supabase, userId, dto.client_id, ano, mes);
+
+    const { data: lancamento, error: lErr } = await supabase
+      .from(LANC_TABLE)
+      .insert({
+        owner_id: userId,
+        periodo_id: periodo.id,
+        data: dto.data,
+        historico_codigo: dto.historico_codigo ?? null,
+        historico_complemento: dto.historico_complemento,
+      })
+      .select('id')
+      .single();
+    if (lErr) throw mapPgrstError(lErr, 'criar lançamento');
+
+    const partidasRows = dto.partidas.map((p, ordem) => ({
+      owner_id: userId,
+      lancamento_id: lancamento.id,
+      plano_conta_id: p.plano_conta_id,
+      tipo: p.tipo,
+      valor_cents: p.valor_cents,
+      ordem,
+    }));
+    const { error: pErr } = await supabase.from(PARTIDA_TABLE).insert(partidasRows);
+    if (pErr) throw mapPgrstError(pErr, 'gravar partidas do lançamento');
+
+    await recomputeSaldosCascade(supabase, userId, periodo.id);
+
+    const { data: fresh, error: fErr } = await supabase
+      .from(LANC_TABLE)
+      .select(LANC_COLS)
+      .eq('id', lancamento.id)
+      .single();
+    if (fErr) throw mapPgrstError(fErr, 'reler lançamento');
+
+    res.status(201).json({ lancamento: normalizeLancamento(fresh as unknown as LancamentoRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /lancamentos?periodo_id=  — lançamentos do período, em ordem cronológica
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/lancamentos', async (req, res, next) => {
+  try {
+    const { periodo_id } = lancamentosListQuerySchema.parse(req.query);
+    const { data, error } = await db(req)
+      .from(LANC_TABLE)
+      .select(LANC_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('data', { ascending: true })
+      .order('created_at', { ascending: true })
+      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
+    if (error) throw mapPgrstError(error, 'listar lançamentos');
+    res.json({ lancamentos: ((data ?? []) as unknown as LancamentoRow[]).map(normalizeLancamento) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// PATCH /lancamentos/:id  — apaga+recria as partidas (nunca edita em lugar)
+// --------------------------------------------------------------------------- #
+contabilRouter.patch('/lancamentos/:id', async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+
+  try {
+    const dto = lancamentoUpdateSchema.parse(req.body);
+
+    const { data: atual, error: aErr } = await supabase
+      .from(LANC_TABLE)
+      .select('id, periodo_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (aErr) throw mapPgrstError(aErr, 'buscar lançamento');
+    if (!atual) throw notFound('Lançamento não encontrado');
+
+    const { data: periodoAtual, error: paErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select('id, client_id, status')
+      .eq('id', atual.periodo_id)
+      .single();
+    if (paErr) throw mapPgrstError(paErr, 'buscar período do lançamento');
+    if (periodoAtual.status === 'fechado') {
+      throw badRequest('O período desse lançamento está fechado — não é possível editá-lo.');
+    }
+
+    await assertPartidasContasValidas(supabase, periodoAtual.client_id as string, dto.partidas);
+
+    // resolve o período do NOVO valor de `data` (pode ter mudado de mês) —
+    // valida os dois períodos (velho e novo) ANTES de apagar qualquer
+    // dado: se rejeitasse depois de apagar, um PATCH inválido destruiria
+    // as partidas antigas sem gravar as novas.
+    const [ano, mes] = anoMesDe(dto.data);
+    const novoPeriodo = await resolvePeriodoAberto(
+      supabase,
+      userId,
+      periodoAtual.client_id as string,
+      ano,
+      mes,
+    );
+
+    const { error: uErr } = await supabase
+      .from(LANC_TABLE)
+      .update({
+        periodo_id: novoPeriodo.id,
+        data: dto.data,
+        historico_codigo: dto.historico_codigo ?? null,
+        historico_complemento: dto.historico_complemento,
+      })
+      .eq('id', req.params.id);
+    if (uErr) throw mapPgrstError(uErr, 'atualizar lançamento');
+
+    const { error: dErr } = await supabase.from(PARTIDA_TABLE).delete().eq('lancamento_id', req.params.id);
+    if (dErr) throw mapPgrstError(dErr, 'limpar partidas antigas');
+
+    const partidasRows = dto.partidas.map((p, ordem) => ({
+      owner_id: userId,
+      lancamento_id: req.params.id,
+      plano_conta_id: p.plano_conta_id,
+      tipo: p.tipo,
+      valor_cents: p.valor_cents,
+      ordem,
+    }));
+    const { error: pErr } = await supabase.from(PARTIDA_TABLE).insert(partidasRows);
+    if (pErr) throw mapPgrstError(pErr, 'gravar partidas do lançamento');
+
+    // recalcula os dois períodos quando mudam de mês — não dá pra confiar
+    // que a cascata de um alcança o outro (se houver um período FECHADO
+    // entre os dois, a cascata de um nunca chega no outro).
+    await recomputeSaldosCascade(supabase, userId, novoPeriodo.id);
+    if (novoPeriodo.id !== periodoAtual.id) {
+      await recomputeSaldosCascade(supabase, userId, periodoAtual.id as string);
+    }
+
+    const { data: fresh, error: fErr } = await supabase
+      .from(LANC_TABLE)
+      .select(LANC_COLS)
+      .eq('id', req.params.id)
+      .single();
+    if (fErr) throw mapPgrstError(fErr, 'reler lançamento');
+
+    res.json({ lancamento: normalizeLancamento(fresh as unknown as LancamentoRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// DELETE /lancamentos/:id  — bloqueia se o período estiver fechado
+// --------------------------------------------------------------------------- #
+contabilRouter.delete('/lancamentos/:id', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+    const userId = req.auth!.userId;
+
+    const { data: atual, error: aErr } = await supabase
+      .from(LANC_TABLE)
+      .select('id, periodo_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (aErr) throw mapPgrstError(aErr, 'buscar lançamento');
+    if (!atual) throw notFound('Lançamento não encontrado');
+
+    const { data: periodo, error: pErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select('status')
+      .eq('id', atual.periodo_id)
+      .single();
+    if (pErr) throw mapPgrstError(pErr, 'buscar período do lançamento');
+    if (periodo.status === 'fechado') {
+      throw badRequest('O período desse lançamento está fechado — não é possível excluí-lo.');
+    }
+
+    const { error, count } = await supabase
+      .from(LANC_TABLE)
+      .delete({ count: 'exact' })
+      .eq('id', req.params.id);
+    if (error) throw mapPgrstError(error, 'excluir lançamento');
+    if (!count) throw notFound('Lançamento não encontrado');
+
+    await recomputeSaldosCascade(supabase, userId, atual.periodo_id as string);
+
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/dre?periodo_id=  — receitas, despesas e os dois resultados
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/dre', async (req, res, next) => {
+  try {
+    const { periodo_id } = saldosListQuerySchema.parse(req.query);
+    const dre = await montarDreRelatorio(db(req), periodo_id);
+    res.json(dre);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/balancete/pdf?periodo_id=  — PDF gerado no parser (Python)
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/balancete/pdf', async (req, res, next) => {
+  try {
+    const { periodo_id } = saldosListQuerySchema.parse(req.query);
+    const supabase = db(req);
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select('client_id, ano, mes')
+      .eq('id', periodo_id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período do balancete');
+    if (!periodo) throw notFound('Período não encontrado');
+
+    const { data: saldos, error: salErr } = await supabase
+      .from(SALDO_TABLE)
+      .select(SALDO_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('ordem', { ascending: true });
+    if (salErr) throw mapPgrstError(salErr, 'ler saldos do balancete');
+
+    const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
+
+    const pdf = await callGerarBalancetePdf({
+      cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
+      periodo: { ano: periodo.ano as number, mes: periodo.mes as number },
+      linhas: (saldos ?? []).map((s) => toContaItem(s as unknown as ContaItemLike)),
+    });
+
+    const filename = nomeArquivoRelatorio('Balancete', cliente.dominio_code, periodo.ano as number, periodo.mes as number);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/dre/pdf?periodo_id=  — PDF gerado no parser (Python)
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/dre/pdf', async (req, res, next) => {
+  try {
+    const { periodo_id } = saldosListQuerySchema.parse(req.query);
+    const supabase = db(req);
+
+    const dre = await montarDreRelatorio(supabase, periodo_id);
+    const cliente = await buscarClientePraRelatorio(supabase, dre.periodo.client_id);
+
+    const pdf = await callGerarDrePdf({
+      cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
+      periodo: { ano: dre.periodo.ano, mes: dre.periodo.mes },
+      receitas: {
+        raiz: toContaItem(dre.receitas.raiz),
+        linhas: dre.receitas.linhas.map((l) => toContaItem(l)),
+      },
+      despesas: {
+        raiz: toContaItem(dre.despesas.raiz),
+        linhas: dre.despesas.linhas.map((l) => toContaItem(l)),
+      },
+      resultado_mes: { cents: dre.resultado_mes_cents, natureza: dre.resultado_mes_natureza },
+      resultado_exercicio: { cents: dre.resultado_exercicio_cents, natureza: dre.resultado_exercicio_natureza },
+    });
+
+    const filename = nomeArquivoRelatorio('DRE', cliente.dominio_code, dre.periodo.ano, dre.periodo.mes);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/razao?periodo_id=&plano_conta_id=  — razão de uma conta analítica
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/razao', async (req, res, next) => {
+  try {
+    const { periodo_id, plano_conta_id } = razaoQuerySchema.parse(req.query);
+    const razao = await montarRazao(db(req), periodo_id, plano_conta_id);
+    res.json(razao);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/razao/pdf?periodo_id=&plano_conta_id=  — PDF gerado no parser
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/razao/pdf', async (req, res, next) => {
+  try {
+    const { periodo_id, plano_conta_id } = razaoQuerySchema.parse(req.query);
+    const supabase = db(req);
+
+    const razao = await montarRazao(supabase, periodo_id, plano_conta_id);
+    const cliente = await buscarClientePraRelatorio(supabase, razao.periodo.client_id);
+
+    const pdf = await callGerarRazaoPdf({
+      cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
+      periodo: { ano: razao.periodo.ano, mes: razao.periodo.mes },
+      conta: razao.conta,
+      saldo_anterior_cents: razao.saldo_anterior_cents,
+      saldo_anterior_natureza: razao.saldo_anterior_natureza,
+      linhas: razao.linhas.map(toRazaoLinha),
+      saldo_atual_cents: razao.saldo_atual_cents,
+      saldo_atual_natureza: razao.saldo_atual_natureza,
+    });
+
+    // inclui o código da conta no nome — sem isso, duas contas do mesmo
+    // período gerariam o mesmo nome de arquivo na pasta de downloads.
+    const filename = nomeArquivoRelatorio(
+      `Razao ${razao.conta.codigo}`,
+      cliente.dominio_code,
+      razao.periodo.ano,
+      razao.periodo.mes,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/livro-diario/pdf?periodo_id=  — PDF gerado no parser (Python)
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/livro-diario/pdf', async (req, res, next) => {
+  try {
+    const { periodo_id } = lancamentosListQuerySchema.parse(req.query);
+    const supabase = db(req);
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select('client_id, ano, mes')
+      .eq('id', periodo_id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período do livro diário');
+    if (!periodo) throw notFound('Período não encontrado');
+
+    const { data: lancs, error: lancsErr } = await supabase
+      .from(LANC_TABLE)
+      .select(LANC_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('data', { ascending: true })
+      .order('created_at', { ascending: true })
+      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
+    if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos do livro diário');
+
+    const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
+
+    const pdf = await callGerarLivroDiarioPdf({
+      cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
+      periodo: { ano: periodo.ano as number, mes: periodo.mes as number },
+      lancamentos: ((lancs ?? []) as unknown as LancamentoRow[])
+        .map(normalizeLancamento)
+        .map((l) => toLivroDiarioLancamento(l as unknown as LivroDiarioLancamentoLike)),
+    });
+
+    const filename = nomeArquivoRelatorio(
+      'Livro Diario',
+      cliente.dominio_code,
+      periodo.ano as number,
+      periodo.mes as number,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
   } catch (err) {
     next(err);
   }
