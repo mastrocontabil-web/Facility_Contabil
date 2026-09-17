@@ -4,13 +4,18 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import {
+  exportarDominioQuerySchema,
   historicoPadraoCreateSchema,
   historicoPadraoUpdateSchema,
   importarBalanceteSchema,
   importarPlanoContasSchema,
+  importarTransacoesSchema,
   lancamentoCreateSchema,
   lancamentoUpdateSchema,
   lancamentosListQuerySchema,
+  modeloCreateSchema,
+  modeloUpdateSchema,
+  modelosListQuerySchema,
   periodosListQuerySchema,
   planoContaCreateSchema,
   planoContaListQuerySchema,
@@ -30,6 +35,12 @@ import {
 import { recomputeSaldosCascade } from './saldoEngine.js';
 import { montarDreRelatorio } from './dreEngine.js';
 import { montarRazao, type RazaoLinha } from './razaoEngine.js';
+import { composeComplemento, type ComplementoModo } from '../dominio/complemento.js';
+import {
+  buildDominioFileFromLancamentos,
+  ExportError,
+  type ExportContabilLancamento,
+} from '../dominio/exporter.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -51,8 +62,15 @@ const SALDO_COLS =
 const LANC_TABLE = 'lancamentos';
 const PARTIDA_TABLE = 'lancamento_partidas';
 const LANC_COLS =
-  'id, periodo_id, data, historico_codigo, historico_complemento, created_at, updated_at, ' +
-  'partidas:lancamento_partidas(id, plano_conta_id, tipo, valor_cents, ordem, ' +
+  'id, periodo_id, data, historico_codigo, historico_complemento, origem_transaction_id, ' +
+  'created_at, updated_at, partidas:lancamento_partidas(id, plano_conta_id, tipo, valor_cents, ordem, ' +
+  'plano_conta:plano_contas(codigo, nome))';
+const AUDITORIA_TABLE = 'contabil_auditoria';
+const MODELO_TABLE = 'lancamento_modelos';
+const MODELO_PARTIDA_TABLE = 'lancamento_modelo_partidas';
+const MODELO_COLS =
+  'id, client_id, nome, historico_codigo, historico_complemento, ativo, created_at, updated_at, ' +
+  'partidas:lancamento_modelo_partidas(id, plano_conta_id, tipo, valor_cents_padrao, ordem, ' +
   'plano_conta:plano_contas(codigo, nome))';
 
 export const contabilRouter = Router();
@@ -109,6 +127,64 @@ async function resolvePeriodoAberto(
     throw badRequest('Esse período já está fechado — não é possível lançar nele.');
   }
   return periodo as { id: string; status: string };
+}
+
+type PeriodoRef = { id: string; ano: number; mes: number };
+
+/**
+ * Períodos de um cliente formam sempre um prefixo cronológico contíguo de
+ * fechados (C10) — busca todos os períodos do cliente e filtra em JS (volume
+ * sempre pequeno por cliente, e evita depender de filtro composto (ano,mes)
+ * que o fakeSupabase não simula bem).
+ */
+async function periodoAnteriorAberto(
+  supabase: SupabaseClient,
+  clientId: string,
+  ano: number,
+  mes: number,
+): Promise<PeriodoRef | null> {
+  const { data, error } = await supabase
+    .from(PERIODO_TABLE)
+    .select('id, ano, mes, status')
+    .eq('client_id', clientId);
+  if (error) throw mapPgrstError(error, 'listar períodos do cliente');
+  const anterior = (data ?? [])
+    .filter((p) => p.status === 'aberto' && (p.ano < ano || (p.ano === ano && p.mes < mes)))
+    .sort((a, b) => a.ano - b.ano || a.mes - b.mes);
+  return anterior[0] ? { id: anterior[0].id, ano: anterior[0].ano, mes: anterior[0].mes } : null;
+}
+
+/** Espelho de periodoAnteriorAberto, na direção oposta (guarda-corpo da reabertura). */
+async function periodoPosteriorFechado(
+  supabase: SupabaseClient,
+  clientId: string,
+  ano: number,
+  mes: number,
+): Promise<PeriodoRef | null> {
+  const { data, error } = await supabase
+    .from(PERIODO_TABLE)
+    .select('id, ano, mes, status')
+    .eq('client_id', clientId);
+  if (error) throw mapPgrstError(error, 'listar períodos do cliente');
+  const posterior = (data ?? [])
+    .filter((p) => p.status === 'fechado' && (p.ano > ano || (p.ano === ano && p.mes > mes)))
+    .sort((a, b) => a.ano - b.ano || a.mes - b.mes);
+  return posterior[0] ? { id: posterior[0].id, ano: posterior[0].ano, mes: posterior[0].mes } : null;
+}
+
+type AcaoAuditoria = 'fechado' | 'reaberto' | 'dominio_exportado';
+
+async function registrarAuditoria(
+  supabase: SupabaseClient,
+  userId: string,
+  periodoId: string,
+  acao: AcaoAuditoria,
+  detalhe: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await supabase
+    .from(AUDITORIA_TABLE)
+    .insert({ owner_id: userId, periodo_id: periodoId, acao, detalhe });
+  if (error) throw mapPgrstError(error, 'registrar evento de auditoria');
 }
 
 /**
@@ -243,6 +319,7 @@ type LancamentoRow = {
   data: string;
   historico_codigo: string | null;
   historico_complemento: string;
+  origem_transaction_id: string | null;
   created_at: string;
   updated_at: string;
   partidas: Array<{
@@ -256,6 +333,32 @@ type LancamentoRow = {
 };
 
 function normalizeLancamento(row: LancamentoRow) {
+  return {
+    ...row,
+    partidas: (row.partidas ?? []).map((p) => ({ ...p, plano_conta: unwrapEmbed(p.plano_conta) })),
+  };
+}
+
+type ModeloRow = {
+  id: string;
+  client_id: string;
+  nome: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  ativo: boolean;
+  created_at: string;
+  updated_at: string;
+  partidas: Array<{
+    id: string;
+    plano_conta_id: string;
+    tipo: string;
+    valor_cents_padrao: number | null;
+    ordem: number;
+    plano_conta: { codigo: string; nome: string } | { codigo: string; nome: string }[] | null;
+  }> | null;
+};
+
+function normalizeModelo(row: ModeloRow) {
   return {
     ...row,
     partidas: (row.partidas ?? []).map((p) => ({ ...p, plano_conta: unwrapEmbed(p.plano_conta) })),
@@ -905,6 +1008,152 @@ contabilRouter.delete('/lancamentos/:id', async (req, res, next) => {
 });
 
 // --------------------------------------------------------------------------- #
+// Modelos de lançamento (C9) — molde reutilizável pra lançamento recorrente.
+// Nunca mexe em período/saldo: é só dado, consumido pelo FRONTEND pra
+// pré-preencher o formulário de "novo lançamento" (POST /lancamentos normal).
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/modelos', async (req, res, next) => {
+  try {
+    const { client_id } = modelosListQuerySchema.parse(req.query);
+    const { data, error } = await db(req)
+      .from(MODELO_TABLE)
+      .select(MODELO_COLS)
+      .eq('client_id', client_id)
+      .order('nome', { ascending: true });
+    if (error) throw mapPgrstError(error, 'listar modelos de lançamento');
+    res.json({ modelos: ((data ?? []) as unknown as ModeloRow[]).map(normalizeModelo) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+contabilRouter.post('/modelos', async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+
+  try {
+    const dto = modeloCreateSchema.parse(req.body);
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', dto.client_id)
+      .maybeSingle();
+    if (cErr) throw mapPgrstError(cErr, 'validar cliente');
+    if (!client) throw notFound('Cliente não encontrado');
+
+    await assertPartidasContasValidas(supabase, dto.client_id, dto.partidas);
+
+    const { data: modelo, error: mErr } = await supabase
+      .from(MODELO_TABLE)
+      .insert({
+        owner_id: userId,
+        client_id: dto.client_id,
+        nome: dto.nome,
+        historico_codigo: dto.historico_codigo ?? null,
+        historico_complemento: dto.historico_complemento,
+      })
+      .select('id')
+      .single();
+    if (mErr) throw mapPgrstError(mErr, 'criar modelo de lançamento');
+
+    const partidasRows = dto.partidas.map((p, ordem) => ({
+      owner_id: userId,
+      modelo_id: modelo.id,
+      plano_conta_id: p.plano_conta_id,
+      tipo: p.tipo,
+      valor_cents_padrao: p.valor_cents_padrao ?? null,
+      ordem,
+    }));
+    const { error: pErr } = await supabase.from(MODELO_PARTIDA_TABLE).insert(partidasRows);
+    if (pErr) throw mapPgrstError(pErr, 'gravar partidas do modelo');
+
+    const { data: fresh, error: fErr } = await supabase
+      .from(MODELO_TABLE)
+      .select(MODELO_COLS)
+      .eq('id', modelo.id)
+      .single();
+    if (fErr) throw mapPgrstError(fErr, 'reler modelo de lançamento');
+
+    res.status(201).json({ modelo: normalizeModelo(fresh as unknown as ModeloRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+contabilRouter.patch('/modelos/:id', async (req, res, next) => {
+  const supabase = db(req);
+  const userId = req.auth!.userId;
+
+  try {
+    const dto = modeloUpdateSchema.parse(req.body);
+
+    const { data: atual, error: aErr } = await supabase
+      .from(MODELO_TABLE)
+      .select('id, client_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (aErr) throw mapPgrstError(aErr, 'buscar modelo de lançamento');
+    if (!atual) throw notFound('Modelo de lançamento não encontrado');
+
+    await assertPartidasContasValidas(supabase, atual.client_id as string, dto.partidas);
+
+    const { error: uErr } = await supabase
+      .from(MODELO_TABLE)
+      .update({
+        nome: dto.nome,
+        historico_codigo: dto.historico_codigo ?? null,
+        historico_complemento: dto.historico_complemento,
+        ...(dto.ativo !== undefined ? { ativo: dto.ativo } : {}),
+      })
+      .eq('id', req.params.id);
+    if (uErr) throw mapPgrstError(uErr, 'atualizar modelo de lançamento');
+
+    const { error: dErr } = await supabase
+      .from(MODELO_PARTIDA_TABLE)
+      .delete()
+      .eq('modelo_id', req.params.id);
+    if (dErr) throw mapPgrstError(dErr, 'limpar partidas antigas do modelo');
+
+    const partidasRows = dto.partidas.map((p, ordem) => ({
+      owner_id: userId,
+      modelo_id: req.params.id,
+      plano_conta_id: p.plano_conta_id,
+      tipo: p.tipo,
+      valor_cents_padrao: p.valor_cents_padrao ?? null,
+      ordem,
+    }));
+    const { error: pErr } = await supabase.from(MODELO_PARTIDA_TABLE).insert(partidasRows);
+    if (pErr) throw mapPgrstError(pErr, 'gravar partidas do modelo');
+
+    const { data: fresh, error: fErr } = await supabase
+      .from(MODELO_TABLE)
+      .select(MODELO_COLS)
+      .eq('id', req.params.id)
+      .single();
+    if (fErr) throw mapPgrstError(fErr, 'reler modelo de lançamento');
+
+    res.json({ modelo: normalizeModelo(fresh as unknown as ModeloRow) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+contabilRouter.delete('/modelos/:id', async (req, res, next) => {
+  try {
+    const { error, count } = await db(req)
+      .from(MODELO_TABLE)
+      .delete({ count: 'exact' })
+      .eq('id', req.params.id);
+    if (error) throw mapPgrstError(error, 'excluir modelo de lançamento');
+    if (!count) throw notFound('Modelo de lançamento não encontrado');
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
 // GET /relatorios/dre?periodo_id=  — receitas, despesas e os dois resultados
 // --------------------------------------------------------------------------- #
 contabilRouter.get('/relatorios/dre', async (req, res, next) => {
@@ -1087,6 +1336,477 @@ contabilRouter.get('/relatorios/livro-diario/pdf', async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(pdf);
+  } catch (err) {
+    next(err);
+  }
+});
+
+type ExportContabilLancamentoLike = {
+  data: string;
+  created_at: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  partidas: Array<{
+    tipo: string;
+    valor_cents: number;
+    ordem: number;
+    plano_conta: { codigo: string; nome: string } | null;
+  }>;
+};
+
+/** Reduz um lançamento (já normalizado — embed desembrulhado) pro shape que
+ * o exportador do Domínio espera. */
+function toExportContabilLancamento(l: ExportContabilLancamentoLike): ExportContabilLancamento {
+  return {
+    data: l.data,
+    created_at: l.created_at,
+    historico_codigo: l.historico_codigo,
+    historico_complemento: l.historico_complemento,
+    partidas: l.partidas.map((p) => ({
+      plano_conta_codigo: p.plano_conta?.codigo ?? '',
+      tipo: p.tipo as 'D' | 'C',
+      valor_cents: p.valor_cents,
+      ordem: p.ordem,
+    })),
+  };
+}
+
+// --------------------------------------------------------------------------- #
+// POST /periodos/:id/fechar  — fecha manualmente um período (sem Balancete).
+// Guarda-corpo (C10): não fecha fora de ordem cronológica; registra o evento
+// na trilha de auditoria.
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/periodos/:id/fechar', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+    const userId = req.auth!.userId;
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select(PERIODO_COLS)
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período');
+    if (!periodo) throw notFound('Período não encontrado');
+    if (periodo.status === 'fechado') throw badRequest('Esse período já está fechado.');
+
+    const { count, error: cErr } = await supabase
+      .from(LANC_TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('periodo_id', req.params.id);
+    if (cErr) throw mapPgrstError(cErr, 'verificar lançamentos do período');
+    if (!count) throw badRequest('Esse período não tem nenhum lançamento — não há o que fechar.');
+
+    const anterior = await periodoAnteriorAberto(
+      supabase,
+      periodo.client_id as string,
+      periodo.ano as number,
+      periodo.mes as number,
+    );
+    if (anterior) {
+      throw badRequest(
+        `Existe um período anterior (${anterior.mes}/${anterior.ano}) ainda aberto — feche os períodos em ordem cronológica antes deste.`,
+      );
+    }
+
+    // SEMPRE antes de trocar o status: recomputeSaldosCascade é no-op se o
+    // período já estiver fechado, então chamada DEPOIS nunca faria nada —
+    // esse é o único jeito de garantir que o período fecha com o saldo em
+    // dia (POST /lancamentos grava a partida e só depois chama o motor,
+    // sem transação — se aquela chamada tiver falhado antes, é aqui que
+    // isso se corrige, de graça, no único momento em que ainda dá tempo).
+    await recomputeSaldosCascade(supabase, userId, req.params.id);
+
+    const { data: fechado, error: upErr } = await supabase
+      .from(PERIODO_TABLE)
+      .update({ status: 'fechado', fechado_em: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select(PERIODO_COLS)
+      .single();
+    if (upErr) throw mapPgrstError(upErr, 'fechar período');
+
+    await registrarAuditoria(supabase, userId, req.params.id, 'fechado', { qtd_lancamentos: count });
+
+    res.json({ periodo: fechado });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// POST /periodos/:id/reabrir  — reabertura simples (C10): sem bloqueio mesmo
+// se já exportado pro Domínio (fica registrado na trilha de auditoria); só
+// bloqueia se isso quebraria a ordem cronológica dos fechamentos do cliente.
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/periodos/:id/reabrir', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+    const userId = req.auth!.userId;
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select(PERIODO_COLS)
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período');
+    if (!periodo) throw notFound('Período não encontrado');
+    if (periodo.status === 'aberto') throw badRequest('Esse período já está aberto.');
+
+    const posterior = await periodoPosteriorFechado(
+      supabase,
+      periodo.client_id as string,
+      periodo.ano as number,
+      periodo.mes as number,
+    );
+    if (posterior) {
+      throw badRequest(
+        `Existe um período posterior (${posterior.mes}/${posterior.ano}) já fechado — reabra os períodos em ordem cronológica inversa a partir dele.`,
+      );
+    }
+
+    const { data: reaberto, error: upErr } = await supabase
+      .from(PERIODO_TABLE)
+      .update({ status: 'aberto', fechado_em: null })
+      .eq('id', req.params.id)
+      .select(PERIODO_COLS)
+      .single();
+    if (upErr) throw mapPgrstError(upErr, 'reabrir período');
+
+    await registrarAuditoria(supabase, userId, req.params.id, 'reaberto', {});
+
+    res.json({ periodo: reaberto });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /periodos/:id/diagnostico  — estado de saúde do período (C10): avisa
+// proativamente os mesmos guarda-corpos de fechar/reabrir, e mostra a trilha
+// de auditoria (mais recente primeiro).
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/periodos/:id/diagnostico', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select(PERIODO_COLS)
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período');
+    if (!periodo) throw notFound('Período não encontrado');
+
+    const { count, error: cErr } = await supabase
+      .from(LANC_TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('periodo_id', req.params.id);
+    if (cErr) throw mapPgrstError(cErr, 'verificar lançamentos do período');
+
+    const clientId = periodo.client_id as string;
+    const ano = periodo.ano as number;
+    const mes = periodo.mes as number;
+    const periodoAnterior =
+      periodo.status === 'aberto' ? await periodoAnteriorAberto(supabase, clientId, ano, mes) : null;
+    const periodoPosterior =
+      periodo.status === 'fechado' ? await periodoPosteriorFechado(supabase, clientId, ano, mes) : null;
+
+    const { data: eventos, error: evErr } = await supabase
+      .from(AUDITORIA_TABLE)
+      .select('id, acao, detalhe, created_at')
+      .eq('periodo_id', req.params.id)
+      .order('created_at', { ascending: false });
+    if (evErr) throw mapPgrstError(evErr, 'listar eventos de auditoria');
+
+    res.json({
+      periodo,
+      qtd_lancamentos: count ?? 0,
+      periodo_anterior_aberto: periodoAnterior,
+      periodo_posterior_fechado: periodoPosterior,
+      eventos: eventos ?? [],
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --------------------------------------------------------------------------- #
+// GET /relatorios/exportar-dominio?periodo_id=&lote_numero=  — .txt Leiaute
+// Domínio a partir dos lançamentos do Contábil (partida múltipla decomposta
+// em pares elementares — ver docs/leiaute-dominio.md). Só período fechado.
+// --------------------------------------------------------------------------- #
+contabilRouter.get('/relatorios/exportar-dominio', async (req, res, next) => {
+  try {
+    const { periodo_id, lote_numero } = exportarDominioQuerySchema.parse(req.query);
+    const supabase = db(req);
+
+    const { data: periodo, error: perErr } = await supabase
+      .from(PERIODO_TABLE)
+      .select('client_id, ano, mes, status')
+      .eq('id', periodo_id)
+      .maybeSingle();
+    if (perErr) throw mapPgrstError(perErr, 'buscar período pra exportar');
+    if (!periodo) throw notFound('Período não encontrado');
+    if (periodo.status !== 'fechado') {
+      throw badRequest('Período precisa estar fechado pra exportar — feche o período antes.');
+    }
+
+    const { data: lancs, error: lancsErr } = await supabase
+      .from(LANC_TABLE)
+      .select(LANC_COLS)
+      .eq('periodo_id', periodo_id)
+      .order('data', { ascending: true })
+      .order('created_at', { ascending: true })
+      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
+    if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos pra exportar');
+
+    const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
+
+    const ano = periodo.ano as number;
+    const mes = periodo.mes as number;
+    const periodo_inicio = `${ano}-${String(mes).padStart(2, '0')}-01`;
+    const ultimoDia = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+    const periodo_fim = `${ano}-${String(mes).padStart(2, '0')}-${String(ultimoDia).padStart(2, '0')}`;
+
+    let out;
+    try {
+      out = buildDominioFileFromLancamentos({
+        empresa_dominio: cliente.dominio_code,
+        cnpj: cliente.cnpj,
+        periodo_inicio,
+        periodo_fim,
+        lote_numero,
+        lancamentos: ((lancs ?? []) as unknown as LancamentoRow[])
+          .map(normalizeLancamento)
+          .map((l) => toExportContabilLancamento(l as unknown as ExportContabilLancamentoLike)),
+      });
+    } catch (e) {
+      if (e instanceof ExportError) throw badRequest(e.message, e.detalhes);
+      throw e;
+    }
+
+    await registrarAuditoria(supabase, req.auth!.userId, periodo_id, 'dominio_exportado', {
+      lote_numero,
+      qtd_lancamentos: out.qtd_lancamentos,
+      sha256: out.sha256,
+    });
+
+    res.setHeader('Content-Type', 'text/plain; charset=iso-8859-1');
+    res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+    res.setHeader('X-Export-Sha256', out.sha256);
+    res.setHeader('X-Export-Linhas', String(out.linhas));
+    res.send(out.content);
+  } catch (err) {
+    next(err);
+  }
+});
+
+type StatementInfo = { id: string; banco_conta_contabil: string | null; complemento_modo: string };
+type TransacaoImportavel = {
+  id: string;
+  statement_id: string;
+  ordem: number;
+  data: string;
+  descricao_raw: string;
+  valor: string; // numeric vem como string do PostgREST
+  direction: 'entrada' | 'saida';
+  conta_contabil: string | null;
+  hist_code: string | null;
+  hist_complemento: string | null;
+};
+
+function ultimoDiaDoMes(ano: number, mes: number): string {
+  const dia = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+  return `${ano}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+
+// --------------------------------------------------------------------------- #
+// POST /lancamentos/importar-transacoes  — traz transações já revisadas do
+// módulo Importação pro Contábil (D banco / C contrapartida, mesma tabela
+// de docs/leiaute-dominio.md). Todo o lote é sempre o mesmo período (ano/mes
+// pedido) — se já fechado, nada é tocado. Transação que não resolve conta
+// (ou já foi importada, ou tá ignorado=true) é pulada, não trava o lote —
+// não dá pra gravar meia-partida (lancamento_partidas.plano_conta_id not null,
+// diferente de saldos_contabeis do C2).
+// --------------------------------------------------------------------------- #
+contabilRouter.post('/lancamentos/importar-transacoes', async (req, res, next) => {
+  try {
+    const supabase = db(req);
+    const userId = req.auth!.userId;
+    const { client_id, ano, mes } = importarTransacoesSchema.parse(req.body);
+
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('id', client_id)
+      .maybeSingle();
+    if (cErr) throw mapPgrstError(cErr, 'validar cliente');
+    if (!client) throw notFound('Cliente não encontrado');
+
+    const periodo = await resolvePeriodoAberto(supabase, userId, client_id, ano, mes);
+
+    const { data: statementsRaw, error: stErr } = await supabase
+      .from('statements')
+      .select('id, banco_conta_contabil, complemento_modo')
+      .eq('client_id', client_id);
+    if (stErr) throw mapPgrstError(stErr, 'ler importações do cliente');
+    const statements = (statementsRaw ?? []) as StatementInfo[];
+    const statementPorId = new Map(statements.map((s) => [s.id, s]));
+    const statementIds = statements.map((s) => s.id);
+
+    const inicio = `${ano}-${String(mes).padStart(2, '0')}-01`;
+    const fim = ultimoDiaDoMes(ano, mes);
+
+    let transacoes: TransacaoImportavel[] = [];
+    if (statementIds.length > 0) {
+      const { data: txRaw, error: tErr } = await supabase
+        .from('transactions')
+        .select(
+          'id, statement_id, ordem, data, descricao_raw, valor, direction, conta_contabil, ' +
+            'hist_code, hist_complemento',
+        )
+        .in('statement_id', statementIds)
+        .gte('data', inicio)
+        .lte('data', fim)
+        .eq('ignorado', false)
+        .order('data', { ascending: true })
+        .order('ordem', { ascending: true });
+      if (tErr) throw mapPgrstError(tErr, 'ler transações do módulo Importação');
+      transacoes = (txRaw ?? []) as unknown as TransacaoImportavel[];
+    }
+
+    if (transacoes.length === 0) {
+      res.json({ periodo, importados: 0, ignorados: 0, warnings: [] });
+      return;
+    }
+
+    const idsTransacoes = transacoes.map((t) => t.id);
+    const { data: jaImportadasRaw, error: jiErr } = await supabase
+      .from(LANC_TABLE)
+      .select('origem_transaction_id')
+      .in('origem_transaction_id', idsTransacoes);
+    if (jiErr) throw mapPgrstError(jiErr, 'verificar transações já importadas');
+    const jaImportadas = new Set(
+      (jaImportadasRaw ?? []).map((l) => l.origem_transaction_id as string),
+    );
+
+    const { data: contasRaw, error: pcErr } = await supabase
+      .from(PLANO_TABLE)
+      .select('id, codigo, tipo, ativo')
+      .eq('client_id', client_id);
+    if (pcErr) throw mapPgrstError(pcErr, 'ler plano de contas do cliente');
+    const contaPorCodigo = new Map((contasRaw ?? []).map((c) => [c.codigo as string, c]));
+
+    const { data: histRaw, error: hErr } = await supabase.from(HIST_TABLE).select('codigo');
+    if (hErr) throw mapPgrstError(hErr, 'ler históricos padrão');
+    const codigosHistoricos = new Set((histRaw ?? []).map((h) => h.codigo as string));
+
+    function resolverConta(codigo: string | null): { id: string } | null {
+      if (!codigo) return null;
+      const c = contaPorCodigo.get(codigo);
+      if (!c || c.tipo !== 'A' || !c.ativo) return null;
+      return { id: c.id as string };
+    }
+
+    let importados = 0;
+    let ignorados = 0;
+    const warnings: string[] = [];
+
+    for (const t of transacoes) {
+      if (jaImportadas.has(t.id)) continue; // já importada — não conta nem como aviso
+
+      const rotulo = `${t.data} "${t.descricao_raw}"`;
+
+      if (!t.conta_contabil) {
+        ignorados++;
+        warnings.push(`${rotulo} — sem conta contábil classificada.`);
+        continue;
+      }
+      const valorCents = Math.round(Number(t.valor) * 100);
+      if (!(valorCents > 0)) {
+        ignorados++;
+        warnings.push(`${rotulo} — valor zero ou inválido.`);
+        continue;
+      }
+
+      const statement = statementPorId.get(t.statement_id);
+      const contaBanco = resolverConta(statement?.banco_conta_contabil ?? null);
+      if (!contaBanco) {
+        ignorados++;
+        warnings.push(
+          `${rotulo} — conta do banco (${statement?.banco_conta_contabil ?? '?'}) não encontrada/ativa no plano de contas.`,
+        );
+        continue;
+      }
+      const contaContrapartida = resolverConta(t.conta_contabil);
+      if (!contaContrapartida) {
+        ignorados++;
+        warnings.push(`${rotulo} — conta ${t.conta_contabil} não encontrada/ativa no plano de contas.`);
+        continue;
+      }
+
+      // entrada -> D banco / C contrapartida; saída -> D contrapartida / C banco
+      // (mesma tabela de docs/leiaute-dominio.md, não uma regra nova).
+      const partidas =
+        t.direction === 'entrada'
+          ? [
+              { plano_conta_id: contaBanco.id, tipo: 'D' as const, valor_cents: valorCents },
+              { plano_conta_id: contaContrapartida.id, tipo: 'C' as const, valor_cents: valorCents },
+            ]
+          : [
+              { plano_conta_id: contaContrapartida.id, tipo: 'D' as const, valor_cents: valorCents },
+              { plano_conta_id: contaBanco.id, tipo: 'C' as const, valor_cents: valorCents },
+            ];
+
+      try {
+        await assertPartidasContasValidas(supabase, client_id, partidas);
+      } catch {
+        ignorados++;
+        warnings.push(`${rotulo} — conta inválida pro lançamento.`);
+        continue;
+      }
+
+      const historicoCodigo = t.hist_code && codigosHistoricos.has(t.hist_code) ? t.hist_code : null;
+      const complemento = composeComplemento(
+        (statement?.complemento_modo ?? 'extrato') as ComplementoModo,
+        t.descricao_raw,
+        t.hist_complemento ?? '',
+        '',
+      );
+
+      const { data: lancamento, error: lErr } = await supabase
+        .from(LANC_TABLE)
+        .insert({
+          owner_id: userId,
+          periodo_id: periodo.id,
+          data: t.data,
+          historico_codigo: historicoCodigo,
+          historico_complemento: complemento || t.descricao_raw.trim() || 'Importado do módulo Importação',
+          origem_transaction_id: t.id,
+        })
+        .select('id')
+        .single();
+      if (lErr) throw mapPgrstError(lErr, 'criar lançamento importado');
+
+      const partidasRows = partidas.map((p, ordem) => ({
+        owner_id: userId,
+        lancamento_id: lancamento.id,
+        plano_conta_id: p.plano_conta_id,
+        tipo: p.tipo,
+        valor_cents: p.valor_cents,
+        ordem,
+      }));
+      const { error: pErr } = await supabase.from(PARTIDA_TABLE).insert(partidasRows);
+      if (pErr) throw mapPgrstError(pErr, 'gravar partidas do lançamento importado');
+
+      importados++;
+    }
+
+    if (importados > 0) {
+      await recomputeSaldosCascade(supabase, userId, periodo.id);
+    }
+
+    res.json({ periodo, importados, ignorados, warnings });
   } catch (err) {
     next(err);
   }

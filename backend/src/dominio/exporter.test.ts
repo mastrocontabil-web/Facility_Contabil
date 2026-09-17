@@ -1,6 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { buildDominioFile, ExportError, type ExportLancamento } from './exporter.js';
+import {
+  buildDominioFile,
+  buildDominioFileFromLancamentos,
+  ExportError,
+  type ExportContabilLancamento,
+  type ExportLancamento,
+} from './exporter.js';
 
 function lanc(over: Partial<ExportLancamento>): ExportLancamento {
   return {
@@ -191,6 +197,170 @@ describe('buildDominioFile — validação', () => {
     expect(() =>
       buildDominioFile({ ...base, conta_banco: '', lancamentos: [lanc({})] }),
     ).toThrow(/conta contábil do banco/);
+  });
+});
+
+// --------------------------------------------------------------------------- #
+// buildDominioFileFromLancamentos (C7) — módulo Contábil, D/C explícito por
+// partida, pode ter mais de 1 débito/crédito por lançamento.
+// --------------------------------------------------------------------------- #
+
+function lancContabil(over: Partial<ExportContabilLancamento>): ExportContabilLancamento {
+  return {
+    data: '2026-07-10',
+    created_at: '2026-07-10T10:00:00.000Z',
+    historico_codigo: '186',
+    historico_complemento: 'servicos prestados',
+    partidas: [
+      { plano_conta_codigo: '272', tipo: 'D', valor_cents: 10258, ordem: 0 },
+      { plano_conta_codigo: '10002', tipo: 'C', valor_cents: 10258, ordem: 1 },
+    ],
+    ...over,
+  };
+}
+
+const baseContabil = {
+  empresa_dominio: '168',
+  cnpj: '11222333000181',
+  periodo_inicio: '2026-07-01',
+  periodo_fim: '2026-07-31',
+  lote_numero: 1,
+};
+
+describe('buildDominioFileFromLancamentos — formato', () => {
+  it('partida simples: mesmo layout de registro 01/02/03/99, sequencial contínuo', () => {
+    const r = buildDominioFileFromLancamentos({ ...baseContabil, lancamentos: [lancContabil({})] });
+    expect(r.content.slice(0, 2).toString('latin1')).toBe('01');
+    expect(r.content.toString('latin1').endsWith('\r\n')).toBe(true);
+    const l = linhasDe(r);
+    expect(l).toHaveLength(4);
+    expect(l[0]).toHaveLength(55);
+    expect(l[1]).toHaveLength(165);
+    expect(l[2]).toHaveLength(664);
+    expect(l[3]).toBe('9'.repeat(100));
+
+    const l01 = l[0]!;
+    expect(l01.slice(0, 2)).toBe('01');
+    expect(l01.slice(2, 9)).toBe('0000168');
+    expect(l01.slice(9, 23)).toBe('11222333000181');
+    expect(l01.slice(23, 33)).toBe('01/07/2026');
+    expect(l01.slice(33, 43)).toBe('31/07/2026');
+    expect(l01.slice(43, 46)).toBe('N05');
+    expect(l01.slice(46, 54)).toBe('00000001');
+    expect(l01.slice(54, 55)).toBe('1');
+
+    const l02 = l[1]!;
+    expect(l02.slice(2, 9)).toBe('0000001');
+    expect(l02[65]).toBe('N');
+
+    const l03 = l[2]!;
+    expect(l03.slice(2, 9)).toBe('0000002');
+    expect(l03.slice(9, 16)).toBe('0000272'); // débito
+    expect(l03.slice(16, 23)).toBe('0010002'); // crédito
+    expect(l03.slice(23, 38)).toBe('000000000010258');
+    expect(l03.slice(38, 45)).toBe('0000186');
+    expect(l03.slice(45, 557).trimEnd()).toBe('SERVICOS PRESTADOS');
+    expect(l03.slice(557, 564)).toBe('0000168');
+    expect(r.warnings).toEqual([]);
+    expect(r.total_debito_cents).toBe(10258);
+    expect(r.total_credito_cents).toBe(10258);
+  });
+
+  it('histórico nulo (lançamento em texto livre) não lança erro — vira 0000000', () => {
+    const r = buildDominioFileFromLancamentos({
+      ...baseContabil,
+      lancamentos: [lancContabil({ historico_codigo: null })],
+    });
+    expect(linhasDe(r)[2]!.slice(38, 45)).toBe('0000000');
+  });
+
+  it('partida múltipla (2 créditos): decompõe em pares elementares e avisa', () => {
+    const r = buildDominioFileFromLancamentos({
+      ...baseContabil,
+      lancamentos: [
+        lancContabil({
+          partidas: [
+            { plano_conta_codigo: '100', tipo: 'D', valor_cents: 10000, ordem: 0 },
+            { plano_conta_codigo: '200', tipo: 'C', valor_cents: 6000, ordem: 0 },
+            { plano_conta_codigo: '300', tipo: 'C', valor_cents: 4000, ordem: 1 },
+          ],
+        }),
+      ],
+    });
+    const l = linhasDe(r);
+    expect(l).toHaveLength(5); // 01 + 02 + 03 + 03 + 99
+
+    const l03a = l[2]!;
+    expect(l03a.slice(2, 9)).toBe('0000002');
+    expect(l03a.slice(9, 16)).toBe('0000100'); // débito A
+    expect(l03a.slice(16, 23)).toBe('0000200'); // crédito B
+    expect(l03a.slice(23, 38)).toBe('000000000006000');
+
+    const l03b = l[3]!;
+    expect(l03b.slice(2, 9)).toBe('0000003'); // sequencial contínuo, não "par"
+    expect(l03b.slice(9, 16)).toBe('0000100'); // débito A de novo (mesma conta, 2º par)
+    expect(l03b.slice(16, 23)).toBe('0000300'); // crédito C
+    expect(l03b.slice(23, 38)).toBe('000000000004000');
+
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toMatch(/partida múltipla/);
+    expect(r.total_debito_cents).toBe(10000);
+    expect(r.total_credito_cents).toBe(10000);
+  });
+
+  it('ordena por data e depois created_at (não um índice sintético)', () => {
+    const r = buildDominioFileFromLancamentos({
+      ...baseContabil,
+      lancamentos: [
+        lancContabil({ data: '2026-07-15', created_at: '2026-07-15T09:00:00.000Z', historico_complemento: 'B' }),
+        lancContabil({ data: '2026-07-01', created_at: '2026-07-01T09:00:00.000Z', historico_complemento: 'A' }),
+        lancContabil({ data: '2026-07-15', created_at: '2026-07-15T14:00:00.000Z', historico_complemento: 'C' }),
+      ],
+    });
+    const l = linhasDe(r);
+    expect(l[2]!.slice(45, 46)).toBe('A');
+    expect(l[4]!.slice(45, 46)).toBe('B');
+    expect(l[6]!.slice(45, 46)).toBe('C');
+  });
+});
+
+describe('buildDominioFileFromLancamentos — validação', () => {
+  it('sem lançamentos', () => {
+    expect(() => buildDominioFileFromLancamentos({ ...baseContabil, lancamentos: [] })).toThrow(ExportError);
+  });
+
+  it('conta com mais de 7 dígitos', () => {
+    expect(() =>
+      buildDominioFileFromLancamentos({
+        ...baseContabil,
+        lancamentos: [
+          lancContabil({
+            partidas: [
+              { plano_conta_codigo: '123456789', tipo: 'D', valor_cents: 100, ordem: 0 },
+              { plano_conta_codigo: '272', tipo: 'C', valor_cents: 100, ordem: 1 },
+            ],
+          }),
+        ],
+      }),
+    ).toThrow(/7 dígitos/);
+  });
+
+  it('débito e crédito que não fecham lança erro nomeando o lançamento — nunca decompõe sem revalidar', () => {
+    expect(() =>
+      buildDominioFileFromLancamentos({
+        ...baseContabil,
+        lancamentos: [
+          lancContabil({
+            data: '2026-07-05',
+            partidas: [
+              { plano_conta_codigo: '100', tipo: 'D', valor_cents: 10000, ordem: 0 },
+              { plano_conta_codigo: '200', tipo: 'C', valor_cents: 6000, ordem: 0 },
+              { plano_conta_codigo: '300', tipo: 'C', valor_cents: 3000, ordem: 1 },
+            ],
+          }),
+        ],
+      }),
+    ).toThrow(/2026-07-05/);
   });
 });
 

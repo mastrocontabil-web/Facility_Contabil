@@ -777,6 +777,230 @@ describe('DELETE /contabil/lancamentos/:id', () => {
   });
 });
 
+const MODELO_TABLE = 'lancamento_modelos';
+const MODELO_PARTIDA_TABLE = 'lancamento_modelo_partidas';
+const MODELO_ID = '66666666-6666-6666-6666-666666666666';
+const modeloBodyComValores = {
+  client_id: CID,
+  nome: 'Depreciação mensal',
+  historico_complemento: 'Depreciação do período',
+  partidas: [
+    { plano_conta_id: contaForn.id, tipo: 'D', valor_cents_padrao: 10000 },
+    { plano_conta_id: contaCaixa.id, tipo: 'C', valor_cents_padrao: 10000 },
+  ],
+};
+const modeloBodySemValores = {
+  client_id: CID,
+  nome: 'Pró-labore sócio X',
+  historico_complemento: 'Pró-labore',
+  partidas: [
+    { plano_conta_id: contaForn.id, tipo: 'D' },
+    { plano_conta_id: contaCaixa.id, tipo: 'C' },
+  ],
+};
+
+describe('GET /contabil/modelos', () => {
+  it('exige client_id', async () => {
+    const { app } = appWith(() => ({ data: [], error: null }));
+    const res = await request(app).get('/contabil/modelos');
+    expect(res.status).toBe(400);
+  });
+
+  it('lista ordenado por nome e normaliza plano_conta (array-de-um vira objeto)', async () => {
+    const { app, ops } = appWith(() => ({
+      data: [
+        {
+          id: MODELO_ID,
+          client_id: CID,
+          nome: 'Depreciação mensal',
+          historico_codigo: null,
+          historico_complemento: 'Depreciação do período',
+          ativo: true,
+          partidas: [
+            {
+              id: 'mp1', plano_conta_id: contaForn.id, tipo: 'D', valor_cents_padrao: 10000, ordem: 0,
+              plano_conta: [{ codigo: '2.1.1.01', nome: 'FORNECEDORES' }],
+            },
+            {
+              id: 'mp2', plano_conta_id: contaCaixa.id, tipo: 'C', valor_cents_padrao: null, ordem: 1,
+              plano_conta: { codigo: '1.1.1.01', nome: 'CAIXA' },
+            },
+          ],
+        },
+      ],
+      error: null,
+    }));
+
+    const res = await request(app).get(`/contabil/modelos?client_id=${CID}`);
+    expect(res.status).toBe(200);
+    expect(res.body.modelos).toHaveLength(1);
+    expect(res.body.modelos[0].partidas[0].plano_conta).toEqual({ codigo: '2.1.1.01', nome: 'FORNECEDORES' });
+    expect(res.body.modelos[0].partidas[1].valor_cents_padrao).toBeNull();
+    expect(ops[0]?.orderCalls).toEqual([{ col: 'nome', foreignTable: undefined, ascending: true }]);
+  });
+});
+
+describe('POST /contabil/modelos', () => {
+  it('rejeita valores preenchidos com débito ≠ crédito antes de tocar no banco', async () => {
+    const { app, ops } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app)
+      .post('/contabil/modelos')
+      .send({
+        ...modeloBodyComValores,
+        partidas: [
+          modeloBodyComValores.partidas[0],
+          { ...modeloBodyComValores.partidas[1], valor_cents_padrao: 5000 },
+        ],
+      });
+    expect(res.status).toBe(400);
+    expect(ops).toHaveLength(0);
+  });
+
+  it('aceita partidas sem valor (não força soma D=C)', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'plano_contas') return { data: [contaForn, contaCaixa], error: null };
+      if (op.table === MODELO_TABLE && op.verb === 'insert') return { data: { id: MODELO_ID }, error: null };
+      if (op.table === MODELO_TABLE && op.verb === 'select') {
+        return { data: { ...modeloBodySemValores, id: MODELO_ID, ativo: true, partidas: [] }, error: null };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app).post('/contabil/modelos').send(modeloBodySemValores);
+    expect(res.status).toBe(201);
+  });
+
+  it('404 quando o cliente não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).post('/contabil/modelos').send(modeloBodyComValores);
+    expect(res.status).toBe(404);
+  });
+
+  it('rejeita posting numa conta sintética', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'plano_contas') return { data: [{ ...contaForn, tipo: 'S' }, contaCaixa], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post('/contabil/modelos').send(modeloBodyComValores);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sintética/i);
+  });
+
+  it('cria o modelo e grava as partidas na ordem certa, sem mexer em período/saldo', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'plano_contas') return { data: [contaForn, contaCaixa], error: null };
+      if (op.table === MODELO_TABLE && op.verb === 'insert') return { data: { id: MODELO_ID }, error: null };
+      if (op.table === MODELO_TABLE && op.verb === 'select') {
+        return {
+          data: {
+            id: MODELO_ID,
+            client_id: CID,
+            nome: modeloBodyComValores.nome,
+            historico_codigo: null,
+            historico_complemento: modeloBodyComValores.historico_complemento,
+            ativo: true,
+            partidas: [
+              {
+                id: 'mp1', plano_conta_id: contaForn.id, tipo: 'D', valor_cents_padrao: 10000, ordem: 0,
+                plano_conta: { codigo: '2.1.1.01', nome: 'FORNECEDORES' },
+              },
+              {
+                id: 'mp2', plano_conta_id: contaCaixa.id, tipo: 'C', valor_cents_padrao: 10000, ordem: 1,
+                plano_conta: { codigo: '1.1.1.01', nome: 'CAIXA' },
+              },
+            ],
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+
+    const res = await request(app).post('/contabil/modelos').send(modeloBodyComValores);
+    expect(res.status).toBe(201);
+    expect(res.body.modelo.partidas).toHaveLength(2);
+
+    const partidaInsert = ops.find((o) => o.table === MODELO_PARTIDA_TABLE && o.verb === 'insert');
+    const payload = partidaInsert?.payload as Array<Record<string, unknown>>;
+    expect(payload).toHaveLength(2);
+    expect(payload[0]).toMatchObject({ tipo: 'D', valor_cents_padrao: 10000, ordem: 0 });
+    expect(payload[1]).toMatchObject({ tipo: 'C', valor_cents_padrao: 10000, ordem: 1 });
+
+    expect(ops.some((o) => o.table === 'periodos_contabeis')).toBe(false);
+    expect(mockedRecompute).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /contabil/modelos/:id', () => {
+  it('404 quando não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).patch(`/contabil/modelos/${MODELO_ID}`).send(modeloBodyComValores);
+    expect(res.status).toBe(404);
+  });
+
+  it('rejeita conta inválida', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === MODELO_TABLE && op.verb === 'select') {
+        return { data: { id: MODELO_ID, client_id: CID }, error: null };
+      }
+      if (op.table === 'plano_contas') return { data: [{ ...contaForn, ativo: false }, contaCaixa], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).patch(`/contabil/modelos/${MODELO_ID}`).send(modeloBodyComValores);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/inativa/i);
+  });
+
+  it('apaga as partidas antigas e grava as novas', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === MODELO_TABLE && op.verb === 'select') {
+        return {
+          data: {
+            id: MODELO_ID,
+            client_id: CID,
+            nome: modeloBodyComValores.nome,
+            historico_codigo: null,
+            historico_complemento: modeloBodyComValores.historico_complemento,
+            ativo: true,
+            partidas: [],
+          },
+          error: null,
+        };
+      }
+      if (op.table === 'plano_contas') return { data: [contaForn, contaCaixa], error: null };
+      return { data: null, error: null };
+    });
+
+    const res = await request(app)
+      .patch(`/contabil/modelos/${MODELO_ID}`)
+      .send({ ...modeloBodyComValores, ativo: false });
+    expect(res.status).toBe(200);
+
+    const delOp = ops.find((o) => o.table === MODELO_PARTIDA_TABLE && o.verb === 'delete');
+    const insOp = ops.find((o) => o.table === MODELO_PARTIDA_TABLE && o.verb === 'insert');
+    expect(ops.indexOf(delOp!)).toBeLessThan(ops.indexOf(insOp!));
+
+    const updateOp = ops.find((o) => o.table === MODELO_TABLE && o.verb === 'update');
+    expect(updateOp?.payload).toMatchObject({ ativo: false });
+  });
+});
+
+describe('DELETE /contabil/modelos/:id', () => {
+  it('404 quando não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).delete(`/contabil/modelos/${MODELO_ID}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('204 quando existe (cascade nas partidas fica a cargo do banco)', async () => {
+    const { app } = appWith(() => ({ data: null, error: null, count: 1 }));
+    const res = await request(app).delete(`/contabil/modelos/${MODELO_ID}`);
+    expect(res.status).toBe(204);
+  });
+});
+
 describe('POST /contabil/saldos/recalcular', () => {
   it('exige periodo_id', async () => {
     const { app } = appWith(() => ({ data: null, error: null }));
@@ -1149,5 +1373,580 @@ describe('GET /contabil/relatorios/livro-diario/pdf', () => {
     });
     const res = await request(app).get(`/contabil/relatorios/livro-diario/pdf?periodo_id=${PERIODO_ID}`);
     expect(res.status).toBe(502);
+  });
+});
+
+describe('POST /contabil/periodos/:id/fechar', () => {
+  it('404 quando período não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(404);
+  });
+
+  it('400 se já está fechado', async () => {
+    const { app } = appWith(() => ({ data: periodoSample, error: null })); // periodoSample.status === 'fechado'
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/já está fechado/);
+  });
+
+  it('400 sem nenhum lançamento no período', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 0 };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/não tem nenhum lançamento/);
+    expect(mockedRecompute).not.toHaveBeenCalled();
+  });
+
+  it('caminho feliz: chama o motor de saldos ANTES de marcar o período como fechado, e registra a auditoria', async () => {
+    const ordem: string[] = [];
+    mockedRecompute.mockImplementation(async () => {
+      ordem.push('recompute');
+    });
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.verb === 'update') {
+        ordem.push('update');
+        return { data: { ...periodoSample, status: 'fechado' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis') return { data: [], error: null }; // guarda-corpo: sem período anterior
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 2 };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(200);
+    expect(mockedRecompute).toHaveBeenCalledWith(expect.anything(), 'user-1', PERIODO_ID);
+    expect(ordem).toEqual(['recompute', 'update']);
+    expect(res.body.periodo.status).toBe('fechado');
+
+    const auditoriaInsert = ops.find((o) => o.table === 'contabil_auditoria' && o.verb === 'insert');
+    expect(auditoriaInsert?.payload).toMatchObject({
+      periodo_id: PERIODO_ID,
+      acao: 'fechado',
+      detalhe: { qtd_lancamentos: 2 },
+    });
+  });
+
+  it('bloqueia fechar fora de ordem cronológica (período anterior ainda aberto)', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis') {
+        return { data: [{ id: 'outro', ano: 2026, mes: 5, status: 'aberto' }], error: null };
+      }
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 2 };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/5\/2026/);
+    expect(mockedRecompute).not.toHaveBeenCalled();
+    expect(ops.some((o) => o.table === 'contabil_auditoria')).toBe(false);
+  });
+
+  it('propaga erro do motor de saldos como erro HTTP', async () => {
+    mockedRecompute.mockRejectedValue(new Error('boom'));
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis') return { data: [], error: null };
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 1 };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/fechar`);
+    expect(res.status).toBe(500);
+  });
+});
+
+describe('POST /contabil/periodos/:id/reabrir', () => {
+  it('404 quando período não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/reabrir`);
+    expect(res.status).toBe(404);
+  });
+
+  it('400 se já está aberto', async () => {
+    const { app } = appWith(() => ({ data: { ...periodoSample, status: 'aberto' }, error: null }));
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/reabrir`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/já está aberto/);
+  });
+
+  it('bloqueia reabrir fora de ordem cronológica (período posterior já fechado)', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: periodoSample, error: null }; // fechado, ano 2026 mes 6
+      }
+      if (op.table === 'periodos_contabeis') {
+        return { data: [{ id: 'outro', ano: 2026, mes: 7, status: 'fechado' }], error: null };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/reabrir`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/7\/2026/);
+  });
+
+  it('caminho feliz: reabre, zera fechado_em, não chama o motor de saldos, registra auditoria', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.verb === 'update') {
+        return { data: { ...periodoSample, status: 'aberto', fechado_em: null }, error: null };
+      }
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: periodoSample, error: null };
+      }
+      if (op.table === 'periodos_contabeis') return { data: [], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).post(`/contabil/periodos/${PERIODO_ID}/reabrir`);
+    expect(res.status).toBe(200);
+    expect(res.body.periodo.status).toBe('aberto');
+    expect(res.body.periodo.fechado_em).toBeNull();
+    expect(mockedRecompute).not.toHaveBeenCalled();
+
+    const updateOp = ops.find((o) => o.table === 'periodos_contabeis' && o.verb === 'update');
+    expect(updateOp?.payload).toMatchObject({ status: 'aberto', fechado_em: null });
+
+    const auditoriaInsert = ops.find((o) => o.table === 'contabil_auditoria' && o.verb === 'insert');
+    expect(auditoriaInsert?.payload).toMatchObject({ periodo_id: PERIODO_ID, acao: 'reaberto', detalhe: {} });
+  });
+});
+
+describe('GET /contabil/periodos/:id/diagnostico', () => {
+  it('404 quando período não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).get(`/contabil/periodos/${PERIODO_ID}/diagnostico`);
+    expect(res.status).toBe(404);
+  });
+
+  it('período aberto com anterior aberto: periodo_anterior_aberto preenchido, posterior não se aplica', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis') {
+        return { data: [{ id: 'outro', ano: 2026, mes: 5, status: 'aberto' }], error: null };
+      }
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 3 };
+      if (op.table === 'contabil_auditoria') return { data: [], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/periodos/${PERIODO_ID}/diagnostico`);
+    expect(res.status).toBe(200);
+    expect(res.body.qtd_lancamentos).toBe(3);
+    expect(res.body.periodo_anterior_aberto).toMatchObject({ ano: 2026, mes: 5 });
+    expect(res.body.periodo_posterior_fechado).toBeNull();
+  });
+
+  it('período fechado com posterior fechado: periodo_posterior_fechado preenchido, anterior não se aplica', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: periodoSample, error: null }; // fechado, ano 2026 mes 6
+      }
+      if (op.table === 'periodos_contabeis') {
+        return { data: [{ id: 'outro', ano: 2026, mes: 7, status: 'fechado' }], error: null };
+      }
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 5 };
+      if (op.table === 'contabil_auditoria') return { data: [], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/periodos/${PERIODO_ID}/diagnostico`);
+    expect(res.status).toBe(200);
+    expect(res.body.periodo_posterior_fechado).toMatchObject({ ano: 2026, mes: 7 });
+    expect(res.body.periodo_anterior_aberto).toBeNull();
+  });
+
+  it('lista os eventos de auditoria mais recente primeiro', async () => {
+    const eventos = [
+      { id: 'ev2', acao: 'dominio_exportado', detalhe: { lote_numero: 1 }, created_at: '2026-06-20T00:00:00.000Z' },
+      { id: 'ev1', acao: 'fechado', detalhe: { qtd_lancamentos: 2 }, created_at: '2026-06-15T00:00:00.000Z' },
+    ];
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'periodos_contabeis' && op.filters.some(([col]) => col === 'id')) {
+        return { data: periodoSample, error: null };
+      }
+      if (op.table === 'periodos_contabeis') return { data: [], error: null };
+      if (op.table === 'lancamentos') return { data: null, error: null, count: 2 };
+      if (op.table === 'contabil_auditoria') return { data: eventos, error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/periodos/${PERIODO_ID}/diagnostico`);
+    expect(res.status).toBe(200);
+    expect(res.body.eventos).toEqual(eventos);
+    const auditoriaOp = ops.find((o) => o.table === 'contabil_auditoria' && o.verb === 'select');
+    expect(auditoriaOp?.orderCalls).toEqual([{ col: 'created_at', foreignTable: undefined, ascending: false }]);
+  });
+});
+
+function lancamentoRowParaExport(
+  overrides: { historico_codigo?: string | null; partidas?: unknown[] } = {},
+) {
+  return {
+    id: LANC_ID,
+    periodo_id: PERIODO_ID,
+    data: '2026-06-15',
+    historico_codigo: overrides.historico_codigo !== undefined ? overrides.historico_codigo : '186',
+    historico_complemento: 'Pagamento fornecedor',
+    created_at: '2026-06-15T10:00:00.000Z',
+    updated_at: '2026-06-15T10:00:00.000Z',
+    partidas: overrides.partidas ?? [
+      {
+        id: 'lp1', plano_conta_id: contaForn.id, tipo: 'D', valor_cents: 10000, ordem: 0,
+        plano_conta: { codigo: '272', nome: 'FORNECEDORES' },
+      },
+      {
+        id: 'lp2', plano_conta_id: contaCaixa.id, tipo: 'C', valor_cents: 10000, ordem: 1,
+        plano_conta: { codigo: '10002', nome: 'CAIXA' },
+      },
+    ],
+  };
+}
+
+describe('GET /contabil/relatorios/exportar-dominio', () => {
+  it('exige periodo_id', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).get('/contabil/relatorios/exportar-dominio');
+    expect(res.status).toBe(400);
+  });
+
+  it('404 quando o período não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('400 se o período ainda está aberto', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: { ...periodoSample, status: 'aberto' }, error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/fechado/);
+  });
+
+  it('gera o .txt do lançamento simples com os headers certos (partida decomposta em 1 par)', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null }; // fechado, ano 2026 mes 6
+      if (op.table === 'clients') return { data: clienteSample, error: null };
+      if (op.table === 'lancamentos') return { data: [lancamentoRowParaExport()], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/plain');
+    expect(res.headers['content-type']).toContain('iso-8859-1');
+    expect(res.headers['content-disposition']).toContain('(168) Dominio 06-2026.txt');
+    expect(res.headers['x-export-sha256']).toBeTruthy();
+    expect(res.headers['x-export-linhas']).toBe('4'); // 01 + 02 + 03 + 99
+
+    const body = res.body instanceof Buffer ? res.body : Buffer.from(res.text ?? '', 'binary');
+    const linhas = body.toString('latin1').replace(/\r\n$/, '').split('\r\n');
+    expect(linhas).toHaveLength(4);
+    expect(linhas[2]!.slice(9, 16)).toBe('0000272'); // débito
+    expect(linhas[2]!.slice(16, 23)).toBe('0010002'); // crédito
+  });
+
+  it('lançamento com partida múltipla decompõe em mais de um registro 03', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'clients') return { data: clienteSample, error: null };
+      if (op.table === 'lancamentos') {
+        return {
+          data: [
+            lancamentoRowParaExport({
+              partidas: [
+                { id: 'lp1', plano_conta_id: 'x', tipo: 'D', valor_cents: 10000, ordem: 0, plano_conta: { codigo: '100', nome: 'A' } },
+                { id: 'lp2', plano_conta_id: 'y', tipo: 'C', valor_cents: 6000, ordem: 0, plano_conta: { codigo: '200', nome: 'B' } },
+                { id: 'lp3', plano_conta_id: 'z', tipo: 'C', valor_cents: 4000, ordem: 1, plano_conta: { codigo: '300', nome: 'C' } },
+              ],
+            }),
+          ],
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(200);
+    const body = res.body instanceof Buffer ? res.body : Buffer.from(res.text ?? '', 'binary');
+    const linhas = body.toString('latin1').replace(/\r\n$/, '').split('\r\n');
+    expect(linhas).toHaveLength(5); // 01 + 02 + 03 + 03 + 99
+  });
+
+  it('histórico nulo (lançamento em texto livre) não trava a exportação', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'clients') return { data: clienteSample, error: null };
+      if (op.table === 'lancamentos') {
+        return { data: [lancamentoRowParaExport({ historico_codigo: null })], error: null };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('conta com código longo demais vira erro 400 (ExportError propagado como badRequest)', async () => {
+    const { app } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'clients') return { data: clienteSample, error: null };
+      if (op.table === 'lancamentos') {
+        return {
+          data: [
+            lancamentoRowParaExport({
+              partidas: [
+                { id: 'lp1', plano_conta_id: 'x', tipo: 'D', valor_cents: 100, ordem: 0, plano_conta: { codigo: '123456789', nome: 'A' } },
+                { id: 'lp2', plano_conta_id: 'y', tipo: 'C', valor_cents: 100, ordem: 1, plano_conta: { codigo: '272', nome: 'B' } },
+              ],
+            }),
+          ],
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(`/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/7 dígitos/);
+  });
+
+  it('registra o evento de auditoria dominio_exportado com lote/qtd/sha256', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'periodos_contabeis') return { data: periodoSample, error: null };
+      if (op.table === 'clients') return { data: clienteSample, error: null };
+      if (op.table === 'lancamentos') return { data: [lancamentoRowParaExport()], error: null };
+      return { data: null, error: null };
+    });
+    const res = await request(app).get(
+      `/contabil/relatorios/exportar-dominio?periodo_id=${PERIODO_ID}&lote_numero=3`,
+    );
+    expect(res.status).toBe(200);
+
+    const auditoriaInsert = ops.find((o) => o.table === 'contabil_auditoria' && o.verb === 'insert');
+    expect(auditoriaInsert?.payload).toMatchObject({
+      periodo_id: PERIODO_ID,
+      acao: 'dominio_exportado',
+      detalhe: { lote_numero: 3, qtd_lancamentos: 1, sha256: res.headers['x-export-sha256'] },
+    });
+  });
+});
+
+const STATEMENT_ID = '77777777-7777-7777-7777-777777777777';
+const TXN_ID = '88888888-8888-8888-8888-888888888888';
+const CONTA_BANCO = { id: 'cb-1', client_id: CID, codigo: '10002', tipo: 'A', ativo: true };
+const CONTA_CONTRAPARTIDA = { id: 'cc-1', client_id: CID, codigo: '272', tipo: 'A', ativo: true };
+
+function statementSample(over: Record<string, unknown> = {}) {
+  return { id: STATEMENT_ID, banco_conta_contabil: '10002', complemento_modo: 'extrato', ...over };
+}
+
+function transacaoSample(over: Record<string, unknown> = {}) {
+  return {
+    id: TXN_ID,
+    statement_id: STATEMENT_ID,
+    ordem: 0,
+    data: '2026-06-10',
+    descricao_raw: 'PIX recebido',
+    valor: '150.00',
+    direction: 'entrada',
+    conta_contabil: '272',
+    hist_code: '138',
+    hist_complemento: '',
+    ...over,
+  };
+}
+
+describe('POST /contabil/lancamentos/importar-transacoes', () => {
+  it('404 quando o cliente não existe', async () => {
+    const { app } = appWith(() => ({ data: null, error: null }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(404);
+  });
+
+  it('400 se o período já está fechado — não toca em transactions/statements', async () => {
+    const { app, ops } = appWith((op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'periodos_contabeis' && op.single === 'single') {
+        return { data: { id: PERIODO_ID, status: 'fechado' }, error: null };
+      }
+      return { data: null, error: null };
+    });
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/fechado/);
+    expect(ops.some((o) => o.table === 'transactions')).toBe(false);
+    expect(ops.some((o) => o.table === 'statements')).toBe(false);
+  });
+
+  function montarHandlerFeliz(opts: {
+    transacoes?: Record<string, unknown>[];
+    statements?: Record<string, unknown>[];
+    jaImportadas?: string[];
+    historicos?: string[];
+  }): FakeHandler {
+    const {
+      transacoes = [transacaoSample()],
+      statements = [statementSample()],
+      jaImportadas = [],
+      historicos = ['138', '186'],
+    } = opts;
+    let seqLancamento = 0;
+    return (op) => {
+      if (op.table === 'clients') return { data: { id: CID }, error: null };
+      if (op.table === 'periodos_contabeis' && op.single === 'single') {
+        return { data: { id: PERIODO_ID, status: 'aberto' }, error: null };
+      }
+      if (op.table === 'periodos_contabeis') return { data: null, error: null }; // upsert
+      if (op.table === 'statements') return { data: statements, error: null };
+      if (op.table === 'transactions') return { data: transacoes, error: null };
+      if (op.table === 'lancamentos' && op.verb === 'select') {
+        return { data: jaImportadas.map((id) => ({ origem_transaction_id: id })), error: null };
+      }
+      if (op.table === 'lancamentos' && op.verb === 'insert') {
+        seqLancamento++;
+        return { data: { id: `lanc-${seqLancamento}` }, error: null };
+      }
+      if (op.table === 'plano_contas') return { data: [CONTA_BANCO, CONTA_CONTRAPARTIDA], error: null };
+      if (op.table === 'historicos_padrao') return { data: historicos.map((codigo) => ({ codigo })), error: null };
+      if (op.table === 'lancamento_partidas') return { data: null, error: null };
+      return { data: null, error: null };
+    };
+  }
+
+  it('transação sem conta_contabil classificada é ignorada com aviso', async () => {
+    const { app } = appWith(montarHandlerFeliz({ transacoes: [transacaoSample({ conta_contabil: null })] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(0);
+    expect(res.body.ignorados).toBe(1);
+    expect(res.body.warnings[0]).toMatch(/sem conta contábil/);
+  });
+
+  it('conta que não existe no plano de contas é ignorada com aviso nomeando o código', async () => {
+    const { app } = appWith(
+      montarHandlerFeliz({ transacoes: [transacaoSample({ conta_contabil: '999999' })] }),
+    );
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(0);
+    expect(res.body.ignorados).toBe(1);
+    expect(res.body.warnings[0]).toMatch(/999999/);
+  });
+
+  it('conta sintética (não analítica) também conta como "não resolve"', async () => {
+    const base = montarHandlerFeliz({});
+    const { app } = appWith((op) => {
+      if (op.table === 'plano_contas') {
+        return { data: [CONTA_BANCO, { ...CONTA_CONTRAPARTIDA, tipo: 'S' }], error: null };
+      }
+      return base(op);
+    });
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(0);
+    expect(res.body.ignorados).toBe(1);
+  });
+
+  it('filtra ignorado=false na busca de transações', async () => {
+    const { app, ops } = appWith(montarHandlerFeliz({}));
+    await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    const opTx = ops.find((o) => o.table === 'transactions');
+    expect(opTx?.filters).toContainEqual(['ignorado', false]);
+  });
+
+  it('transação já importada é pulada sem virar aviso', async () => {
+    const { app } = appWith(montarHandlerFeliz({ jaImportadas: [TXN_ID] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(0);
+    expect(res.body.ignorados).toBe(0);
+    expect(res.body.warnings).toEqual([]);
+  });
+
+  it('historico_codigo fora do catálogo (vazio) vira null, sem erro', async () => {
+    const { app, ops } = appWith(montarHandlerFeliz({ historicos: [] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(1);
+    const insert = ops.find((o) => o.table === 'lancamentos' && o.verb === 'insert');
+    expect((insert?.payload as { historico_codigo: unknown }).historico_codigo).toBeNull();
+  });
+
+  it('entrada: D banco / C contrapartida', async () => {
+    const { app, ops } = appWith(montarHandlerFeliz({ transacoes: [transacaoSample({ direction: 'entrada' })] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(1);
+    const partidasInsert = ops.find((o) => o.table === 'lancamento_partidas');
+    const partidas = partidasInsert?.payload as Array<{ plano_conta_id: string; tipo: string }>;
+    expect(partidas.find((p) => p.tipo === 'D')?.plano_conta_id).toBe(CONTA_BANCO.id);
+    expect(partidas.find((p) => p.tipo === 'C')?.plano_conta_id).toBe(CONTA_CONTRAPARTIDA.id);
+  });
+
+  it('saída: D contrapartida / C banco', async () => {
+    const { app, ops } = appWith(montarHandlerFeliz({ transacoes: [transacaoSample({ direction: 'saida' })] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(1);
+    const partidasInsert = ops.find((o) => o.table === 'lancamento_partidas');
+    const partidas = partidasInsert?.payload as Array<{ plano_conta_id: string; tipo: string }>;
+    expect(partidas.find((p) => p.tipo === 'D')?.plano_conta_id).toBe(CONTA_CONTRAPARTIDA.id);
+    expect(partidas.find((p) => p.tipo === 'C')?.plano_conta_id).toBe(CONTA_BANCO.id);
+  });
+
+  it('recomputeSaldosCascade é chamado uma única vez, mesmo com várias transações no lote', async () => {
+    const TXN_ID_2 = '99999999-9999-9999-9999-999999999999';
+    const { app } = appWith(
+      montarHandlerFeliz({
+        transacoes: [transacaoSample(), transacaoSample({ id: TXN_ID_2, ordem: 1, data: '2026-06-12' })],
+      }),
+    );
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(2);
+    expect(mockedRecompute).toHaveBeenCalledTimes(1);
+    expect(mockedRecompute).toHaveBeenCalledWith(expect.anything(), 'user-1', PERIODO_ID);
+  });
+
+  it('lote sem nenhuma transação candidata não chama o motor de saldos', async () => {
+    const { app } = appWith(montarHandlerFeliz({ transacoes: [] }));
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ importados: 0, ignorados: 0, warnings: [] });
+    expect(mockedRecompute).not.toHaveBeenCalled();
   });
 });

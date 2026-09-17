@@ -3,7 +3,13 @@ import { Modal } from '@/components/Modal';
 import { ApiError } from '@/lib/api';
 import { centsToMoneyInput, parseMoneyToCents } from '@/lib/format';
 import type { Lancamento, NaturezaDC } from '@/lib/types';
-import { useCreateLancamento, useHistoricosPadrao, usePlanoContas, useUpdateLancamento } from './api';
+import {
+  useCreateLancamento,
+  useHistoricosPadrao,
+  useModelos,
+  usePlanoContas,
+  useUpdateLancamento,
+} from './api';
 
 type LinhaPartida = { plano_conta_id: string; tipo: NaturezaDC; valorInput: string };
 
@@ -44,6 +50,7 @@ export function LancamentoModal({
 }) {
   const { data: contas } = usePlanoContas(clientId);
   const { data: historicos } = useHistoricosPadrao();
+  const { data: modelos } = useModelos(clientId);
   const createMut = useCreateLancamento(periodoId);
   const updateMut = useUpdateLancamento(periodoId);
   const mut = lancamento ? updateMut : createMut;
@@ -54,11 +61,29 @@ export function LancamentoModal({
   const [linhas, setLinhas] = useState<LinhaPartida[]>(linhasIniciais(lancamento));
 
   const contasAnaliticas = (contas ?? []).filter((c) => c.tipo === 'A' && c.ativo);
+  const modelosAtivos = (modelos ?? []).filter((m) => m.ativo);
 
   function selecionarHistorico(codigo: string) {
     setHistoricoCodigo(codigo);
     const h = historicos?.find((x) => x.codigo === codigo);
     if (h) setComplemento(h.descricao);
+  }
+
+  function carregarModelo(modeloId: string) {
+    const m = modelos?.find((x) => x.id === modeloId);
+    if (!m) return;
+    setHistoricoCodigo(m.historico_codigo ?? '');
+    setComplemento(m.historico_complemento);
+    setLinhas(
+      m.partidas
+        .slice()
+        .sort((a, b) => a.ordem - b.ordem)
+        .map((p) => ({
+          plano_conta_id: p.plano_conta_id,
+          tipo: p.tipo,
+          valorInput: p.valor_cents_padrao != null ? centsToMoneyInput(p.valor_cents_padrao) : '',
+        })),
+    );
   }
 
   function atualizarLinha(idx: number, patch: Partial<LinhaPartida>) {
@@ -147,7 +172,19 @@ export function LancamentoModal({
               ))}
             </select>
           </div>
-          <div className="sm:col-span-1" />
+          {!lancamento && modelosAtivos.length > 0 && (
+            <div>
+              <label className="label">Carregar modelo (opcional)</label>
+              <select className="input" defaultValue="" onChange={(e) => carregarModelo(e.target.value)}>
+                <option value="">— nenhum —</option>
+                {modelosAtivos.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.nome}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <div>
@@ -172,9 +209,9 @@ export function LancamentoModal({
 
           <div className="space-y-1.5">
             {linhas.map((linha, idx) => (
-              <div key={idx} className="flex items-center gap-1.5">
+              <div key={idx} className="flex flex-wrap items-center gap-1.5">
                 <select
-                  className="input h-9 w-16"
+                  className="input h-9 w-16 shrink-0"
                   value={linha.tipo}
                   onChange={(e) => atualizarLinha(idx, { tipo: e.target.value as NaturezaDC })}
                 >
@@ -182,7 +219,7 @@ export function LancamentoModal({
                   <option value="C">C</option>
                 </select>
                 <select
-                  className="input h-9 flex-1"
+                  className="input h-9 order-3 w-full min-w-0 sm:order-none sm:w-auto sm:flex-1"
                   value={linha.plano_conta_id}
                   onChange={(e) => atualizarLinha(idx, { plano_conta_id: e.target.value })}
                 >
@@ -194,7 +231,7 @@ export function LancamentoModal({
                   ))}
                 </select>
                 <input
-                  className="input h-9 w-32 text-right"
+                  className="input h-9 w-24 shrink-0 text-right sm:w-32"
                   value={linha.valorInput}
                   onChange={(e) => atualizarLinha(idx, { valorInput: e.target.value })}
                   placeholder="0,00"

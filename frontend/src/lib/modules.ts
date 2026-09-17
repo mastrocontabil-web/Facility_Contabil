@@ -52,6 +52,7 @@ export const MODULES: ModuleDef[] = [
       { to: '/contabil/historicos', label: 'Históricos padrão' },
       { to: '/contabil/balancete', label: 'Importar balancete' },
       { to: '/contabil/lancamentos', label: 'Lançamentos' },
+      { to: '/contabil/modelos', label: 'Modelos de lançamento' },
       { to: '/contabil/relatorios/balancete', label: 'Relatório Balancete' },
       { to: '/contabil/relatorios/dre', label: 'DRE' },
       { to: '/contabil/relatorios/razao', label: 'Razão' },

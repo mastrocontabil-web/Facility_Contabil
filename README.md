@@ -161,7 +161,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **221 testes no backend**, **53 no parser**.
+Hoje: **274 testes no backend**, **53 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -174,7 +174,7 @@ caminho não existe (não quebra em outra máquina).
 - [`docs/supabase-setup.md`](docs/supabase-setup.md) — criar o projeto Supabase
 - [`docs/leiaute-dominio.md`](docs/leiaute-dominio.md) — o formato do arquivo gerado
 - [`docs/arquitetura.md`](docs/arquitetura.md) — visão geral
-- [`docs/roadmap.md`](docs/roadmap.md) — milestones (módulos de Importação/Classificação — o módulo Contábil ainda não está lá, ver "Estado atual" abaixo)
+- [`docs/roadmap.md`](docs/roadmap.md) — milestones dos dois roadmaps: módulos de Importação/Classificação (M1-M8) e módulo Contábil (C1-C11)
 
 ## Estado atual
 
@@ -207,7 +207,7 @@ caminho não existe (não quebra em outra máquina).
   classificação" e "extrato + complemento + classificação". Classificação em
   uso não pode ser excluída (só desativada).
 
-**Módulo Contábil (novo, roadmap próprio C1–C11, C1–C6 entregues):**
+**Módulo Contábil (novo, roadmap próprio C1–C11, todos entregues):**
 
 - **C1** — plano de contas: importa o PDF "Plano de Contas" do Domínio ou
   cadastra manualmente; hierarquia sintética/analítica calculada a partir da
@@ -233,10 +233,34 @@ caminho não existe (não quebra em outra máquina).
 - **C6** — relatório Razão (saldo anterior + cada movimento cronológico com
   saldo corrente, por conta analítica) e Livro Diário (lista cronológica de
   lançamentos), os dois com exportação em PDF.
+- **C7** — exportar o período fechado pro arquivo Domínio a partir dos
+  lançamentos do Contábil (não só do Balancete): lançamento com mais de um
+  débito/crédito é decomposto em pares elementares D/C (best-effort, pendente
+  de confirmação contra um import real com partida múltipla — ver
+  `docs/leiaute-dominio.md`). Ação de **fechar período** manualmente
+  introduzida aqui (mínimo necessário; guarda-corpos completos ficaram pro
+  C10).
+- **C8** — importar lançamentos do módulo Importação: transações já
+  classificadas (extrato → conta contábil) viram lançamento de partida
+  dobrada, sem digitar de novo. Idempotente (`origem_transaction_id` único,
+  reimportar não duplica); pula transação sem conta resolvida ou já
+  importada, com aviso; nunca lançamento "pela metade".
+- **C9** — lançamentos recorrentes: **modelo genérico** (nome + histórico +
+  partidas com valor opcional) reutilizável — carregar um modelo só
+  pré-preenche o formulário de lançamento normal, sem endpoint ou validação
+  nova. Tela própria (`/contabil/modelos`) de CRUD.
+- **C10** — trilha de auditoria (`fechado`/`reaberto`/`dominio_exportado`,
+  append-only) e guarda-corpos no fechamento/reabertura de período: não fecha
+  fora de ordem cronológica (período anterior aberto) nem reabre fora de
+  ordem (período posterior fechado). Diagnóstico do período expõe os dois
+  avisos + histórico antes do usuário tentar a ação.
+- **C11** — acabamento: layout responsivo da linha de partida (D/C + conta +
+  valor) nos formulários de lançamento e modelo, barra de ações da tela de
+  Lançamentos reorganizada pra mobile; `docs/roadmap.md` ganhou a seção do
+  módulo Contábil e este README foi atualizado.
 
-**Próximo:** Milestone 8 (deploy) e, no módulo Contábil, C7–C11 (exportar o mês
-pro Domínio com partida múltipla, importar lançamentos a partir do módulo
-Importação, lançamentos recorrentes, fechamento de período, acabamento).
+**Próximo:** Milestone 8 (deploy) do módulo Importação/Classificação — o
+módulo Contábil está com o roadmap C1–C11 completo.
 
 ## Uso no dia a dia
 

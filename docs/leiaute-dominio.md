@@ -109,3 +109,15 @@ extrato e/ou do texto digitado, conforme o modo escolhido
 - Se o Domínio aceita o registro 02 com o campo de texto (pos. 20) em branco.
 - Se o Domínio aceita o código de histórico preenchido (`0000186`) mesmo que o
   histórico 186 não esteja cadastrado na empresa — se der erro, mandar `0000000`.
+- **Partida múltipla (C7, módulo Contábil)**: nunca foi decodificado um export
+  real do Domínio com lançamento de mais de 1 débito ou crédito. O exportador
+  do Contábil (`buildDominioFileFromLancamentos`) decompõe esses casos numa
+  sequência de registros 03 (pares débito/crédito elementares) sob o mesmo
+  registro 02 — melhor esforço, não validado. Consequência direta: a regra
+  "sequencial GLOBAL: 02 ímpar, 03 par" descrita acima só vale enquanto todo
+  lançamento tem exatamente 1 registro 03; a partir do primeiro lançamento
+  com partida múltipla, a paridade para de valer (o contador continua único e
+  crescente, só a paridade que quebra). Como o próprio doc já registra que
+  "a ordem dos lançamentos não importa para o Domínio", é bem possível que a
+  paridade nunca tenha sido validada por ele também — mas isso ainda não foi
+  confirmado com um import real.

@@ -4,6 +4,8 @@ export type FakeOp = {
   table: string;
   verb: 'select' | 'insert' | 'update' | 'delete' | 'upsert';
   filters: Array<[string, unknown]>;
+  /** Filtros de intervalo (.gte()/.lte()), separados de `filters` (que é sempre igualdade/`in`). */
+  rangeFilters: Array<{ op: 'gte' | 'lte'; col: string; val: unknown }>;
   payload?: unknown;
   single?: 'single' | 'maybeSingle' | null;
   orderBy?: string;
@@ -89,6 +91,14 @@ export function makeFakeSupabase(
         op.filters.push([col, vals]);
         return builder;
       },
+      gte(col: string, val: unknown) {
+        op.rangeFilters.push({ op: 'gte', col, val });
+        return builder;
+      },
+      lte(col: string, val: unknown) {
+        op.rangeFilters.push({ op: 'lte', col, val });
+        return builder;
+      },
       or(expr: string) {
         op.or = expr;
         return builder;
@@ -146,7 +156,7 @@ export function makeFakeSupabase(
 
   const client = {
     from(table: string) {
-      return makeBuilder({ table, verb: 'select', filters: [], orderCalls: [] });
+      return makeBuilder({ table, verb: 'select', filters: [], rangeFilters: [], orderCalls: [] });
     },
     storage: { from: storageBucket },
     async rpc(fn: string, args: Record<string, unknown>) {

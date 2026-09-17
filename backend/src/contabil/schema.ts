@@ -108,9 +108,64 @@ export const razaoQuerySchema = z.object({
   plano_conta_id: z.string().uuid(),
 });
 
+export const importarTransacoesSchema = z.object({
+  client_id: z.string().uuid(),
+  ano: z.coerce.number().int().min(2000).max(2100),
+  mes: z.coerce.number().int().min(1).max(12),
+});
+
+const modeloPartidaSchema = z.object({
+  plano_conta_id: z.string().uuid(),
+  tipo: z.enum(['D', 'C']),
+  valor_cents_padrao: z.coerce.number().int().positive().optional().nullable(),
+});
+
+function modeloPartidasBalanceadasSeCompletas(
+  partidas: { tipo: 'D' | 'C'; valor_cents_padrao?: number | null }[],
+): boolean {
+  if (partidas.some((p) => p.valor_cents_padrao == null)) return true; // incompleto: não valida aqui
+  const d = partidas.filter((p) => p.tipo === 'D').reduce((s, p) => s + (p.valor_cents_padrao ?? 0), 0);
+  const c = partidas.filter((p) => p.tipo === 'C').reduce((s, p) => s + (p.valor_cents_padrao ?? 0), 0);
+  return d === c && d > 0;
+}
+
+const modeloRefinement = {
+  message: 'se todos os valores forem preenchidos, débito e crédito precisam bater',
+  path: ['partidas'],
+};
+
+const modeloBaseSchema = z.object({
+  client_id: z.string().uuid(),
+  nome: z.string().trim().min(1, 'nome obrigatório').max(200),
+  historico_codigo: codigoHistorico.optional().nullable(),
+  historico_complemento: z.string().trim().max(500).default(''),
+  partidas: z.array(modeloPartidaSchema).min(2, 'precisa de pelo menos 1 débito e 1 crédito'),
+});
+
+export const modeloCreateSchema = modeloBaseSchema.refine(
+  (d) => modeloPartidasBalanceadasSeCompletas(d.partidas),
+  modeloRefinement,
+);
+
+export const modeloUpdateSchema = modeloBaseSchema
+  .omit({ client_id: true })
+  .extend({ ativo: z.boolean().optional() })
+  .refine((d) => modeloPartidasBalanceadasSeCompletas(d.partidas), modeloRefinement);
+
+export const modelosListQuerySchema = z.object({ client_id: z.string().uuid() });
+
+export const exportarDominioQuerySchema = z.object({
+  periodo_id: z.string().uuid(),
+  // mesmo limite de statements/schema.ts (registro 01 empacota em 8 dígitos
+  // via pad0 — um valor maior não erra, só corrompe o fim do registro em silêncio).
+  lote_numero: z.coerce.number().int().min(0).max(99_999_999).default(1),
+});
+
 export type PlanoContaCreate = z.infer<typeof planoContaCreateSchema>;
 export type PlanoContaUpdate = z.infer<typeof planoContaUpdateSchema>;
 export type HistoricoPadraoCreate = z.infer<typeof historicoPadraoCreateSchema>;
 export type HistoricoPadraoUpdate = z.infer<typeof historicoPadraoUpdateSchema>;
 export type LancamentoCreate = z.infer<typeof lancamentoCreateSchema>;
 export type LancamentoUpdate = z.infer<typeof lancamentoUpdateSchema>;
+export type ModeloCreate = z.infer<typeof modeloCreateSchema>;
+export type ModeloUpdate = z.infer<typeof modeloUpdateSchema>;

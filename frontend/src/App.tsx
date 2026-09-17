@@ -16,6 +16,7 @@ import { PlanoContasPage } from '@/features/contabil/PlanoContasPage';
 import { HistoricosPadraoPage } from '@/features/contabil/HistoricosPadraoPage';
 import { BalancetePage } from '@/features/contabil/BalancetePage';
 import { LancamentosPage } from '@/features/contabil/LancamentosPage';
+import { ModelosPage } from '@/features/contabil/ModelosPage';
 import { RelatorioBalancetePage } from '@/features/contabil/RelatorioBalancetePage';
 import { RelatorioDrePage } from '@/features/contabil/RelatorioDrePage';
 import { RelatorioRazaoPage } from '@/features/contabil/RelatorioRazaoPage';
@@ -46,6 +47,7 @@ export function App() {
         <Route path="/contabil/historicos" element={<HistoricosPadraoPage />} />
         <Route path="/contabil/balancete" element={<BalancetePage />} />
         <Route path="/contabil/lancamentos" element={<LancamentosPage />} />
+        <Route path="/contabil/modelos" element={<ModelosPage />} />
         <Route path="/contabil/relatorios/balancete" element={<RelatorioBalancetePage />} />
         <Route path="/contabil/relatorios/dre" element={<RelatorioDrePage />} />
         <Route path="/contabil/relatorios/razao" element={<RelatorioRazaoPage />} />

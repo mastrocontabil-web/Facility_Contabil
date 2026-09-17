@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiDownload, saveBlob } from '@/lib/api';
 import type {
+  DiagnosticoPeriodo,
   DreRelatorio,
   HistoricoPadrao,
   Lancamento,
+  LancamentoModelo,
   NaturezaDC,
   PeriodoContabil,
   PlanoConta,
@@ -282,6 +284,123 @@ export function useExportarLivroDiarioPdf() {
         `/api/contabil/relatorios/livro-diario/pdf?periodo_id=${periodoId}`,
       );
       saveBlob(blob, filename);
+    },
+  });
+}
+
+export function useFecharPeriodo(clientId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (periodoId: string) =>
+      api<{ periodo: PeriodoContabil }>(`/api/contabil/periodos/${periodoId}/fechar`, { method: 'POST' }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['periodos', clientId] });
+      qc.invalidateQueries({ queryKey: ['lancamentos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['saldos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['diagnostico', data.periodo.id] });
+    },
+  });
+}
+
+export function useReabrirPeriodo(clientId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (periodoId: string) =>
+      api<{ periodo: PeriodoContabil }>(`/api/contabil/periodos/${periodoId}/reabrir`, { method: 'POST' }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['periodos', clientId] });
+      qc.invalidateQueries({ queryKey: ['lancamentos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['saldos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['diagnostico', data.periodo.id] });
+    },
+  });
+}
+
+export function useDiagnosticoPeriodo(periodoId: string | undefined) {
+  return useQuery({
+    queryKey: ['diagnostico', periodoId],
+    queryFn: () => api<DiagnosticoPeriodo>(`/api/contabil/periodos/${periodoId}/diagnostico`),
+    enabled: !!periodoId,
+  });
+}
+
+export function useExportarDominio() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ periodoId, loteNumero }: { periodoId: string; loteNumero: number }) => {
+      const { blob, filename } = await apiDownload(
+        `/api/contabil/relatorios/exportar-dominio?periodo_id=${periodoId}&lote_numero=${loteNumero}`,
+      );
+      saveBlob(blob, filename);
+    },
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: ['diagnostico', vars.periodoId] }),
+  });
+}
+
+export function useModelos(clientId: string | undefined) {
+  return useQuery({
+    queryKey: ['modelos', clientId],
+    queryFn: () => api<{ modelos: LancamentoModelo[] }>(`/api/contabil/modelos?client_id=${clientId}`),
+    select: (d) => d.modelos,
+    enabled: !!clientId,
+  });
+}
+
+export type ModeloPartidaInput = { plano_conta_id: string; tipo: NaturezaDC; valor_cents_padrao?: number | null };
+
+export type ModeloInput = {
+  client_id: string;
+  nome: string;
+  historico_codigo?: string | null;
+  historico_complemento: string;
+  partidas: ModeloPartidaInput[];
+};
+
+export function useCreateModelo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ModeloInput) =>
+      api<{ modelo: LancamentoModelo }>('/api/contabil/modelos', { method: 'POST', body: input }),
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: ['modelos', vars.client_id] }),
+  });
+}
+
+export function useUpdateModelo(clientId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: Omit<ModeloInput, 'client_id'> & { ativo?: boolean } }) =>
+      api<{ modelo: LancamentoModelo }>(`/api/contabil/modelos/${id}`, { method: 'PATCH', body: input }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['modelos', clientId] }),
+  });
+}
+
+export function useDeleteModelo(clientId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/contabil/modelos/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['modelos', clientId] }),
+  });
+}
+
+export type ImportarTransacoesResult = {
+  periodo: PeriodoContabil;
+  importados: number;
+  ignorados: number;
+  warnings: string[];
+};
+
+export function useImportarTransacoes(clientId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { client_id: string; ano: number; mes: number }) =>
+      api<ImportarTransacoesResult>('/api/contabil/lancamentos/importar-transacoes', {
+        method: 'POST',
+        body: input,
+      }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['lancamentos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['saldos', data.periodo.id] });
+      qc.invalidateQueries({ queryKey: ['periodos', clientId] });
     },
   });
 }

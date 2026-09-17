@@ -11,6 +11,147 @@
 | 7 | Reimportar + histórico + polimento | ✅ feito |
 | 8 | Deploy + docs de operação | ⏳ próximo |
 
+## Módulo Contábil (C1-C11)
+
+Escrituração contábil em partida dobrada por dentro do próprio sistema —
+roadmap e numeração próprios ("C" de Contábil), independentes do M1-M8 acima
+(módulo Importação/Classificação). Todos os 11 milestones entregues.
+
+| # | Milestone | Estado |
+|---|-----------|--------|
+| C1 | Plano de contas (import PDF + manual) + históricos padrão | ✅ feito |
+| C2 | Importar balancete (fecha o período, vira autoridade) | ✅ feito |
+| C3 | Lançamento manual em partida dobrada (simples/múltipla) | ✅ feito |
+| C4 | Motor de saldos (recalcula em cascata, ancorado no último fechado) | ✅ feito |
+| C5 | Relatórios Balancete + DRE, PDF de verdade (parser/reportlab) | ✅ feito (DRE bate cent-a-cent com o Domínio) |
+| C6 | Relatórios Razão + Livro Diário, PDF | ✅ feito |
+| C7 | Exportar pro Domínio a partir dos lançamentos + fechar período | ✅ feito |
+| C8 | Importar lançamentos do módulo Importação | ✅ feito |
+| C9 | Lançamentos recorrentes (modelo genérico) | ✅ feito |
+| C10 | Trilha de auditoria + guarda-corpos + diagnóstico do fechamento | ✅ feito |
+| C11 | Acabamento — sub-nav, polimento, mobile, docs | ✅ feito |
+
+### C1 — Plano de contas + históricos padrão
+
+`backend/src/contabil/`: `plano_contas` (hierárquica — `tipo` sintética/
+analítica, `classificacao` tipo "1.1.1.02", `parent_id`) e `historicos_padrao`
+(catálogo único do escritório, sem `client_id`). `parent_id` de toda conta do
+cliente é recalculado via RPC (`relink_plano_contas_parents`) a cada import ou
+edição — nunca mantido manualmente. Import lê o PDF "Plano de Contas" do
+Domínio no parser Python; cadastro manual pela tela cobre o caso avulso.
+
+### C2 — Importar balancete
+
+Sobe o PDF "Balancete" do Domínio, grava uma linha de `saldos_contabeis` por
+conta naquele período (vinculando por código ao plano de contas) e o período
+nasce **fechado** — vira autoridade: nenhum lançamento manual entra ali, e o
+motor de saldos (C4) nunca recalcula por cima. Conta do balancete sem
+correspondência no plano de contas entra **sem vínculo** (linha órfã, com
+aviso), em vez de travar a importação inteira.
+
+### C3 — Lançamento manual em partida dobrada
+
+`lancamentos` (cabeçalho: data, histórico) + `lancamento_partidas` (linhas
+D/C, `valor_cents`, `plano_conta_id not null`) — soma dos débitos precisa
+igualar a soma dos créditos, validado no backend (zod), não como CHECK (regra
+cruza linhas). O período do mês da data lançada **abre sozinho**
+(`resolvePeriodoAberto`, upsert com `ignoreDuplicates`); nunca lança nem edita
+num período já fechado. Editar/excluir sempre apaga e recria as partidas (nunca
+edição em lugar), mesmo padrão de "reimportar" do módulo Importação.
+
+### C4 — Motor de saldos
+
+`saldoEngine.ts`: recalcula o saldo de toda conta (inclusive sintética, por
+rollup dos filhos) sempre que um lançamento entra, sai ou muda num período
+aberto. Convenção de aritmética com sinal (D positivo, C negativo — zero é
+natureza `null`) simplifica a soma em vez de ramificar por natureza a cada
+operação. Ancora sempre no saldo do **último período fechado** daquele
+cliente e recalcula o trecho aberto inteiro a partir dali; nunca sobrescreve
+saldo de um período fechado (Balancete ou fechamento manual são autoridade).
+
+### C5 — Relatórios Balancete + DRE
+
+Primeira geração de PDF de verdade do sistema: o parser (Python + reportlab)
+monta os bytes a partir de um JSON já pronto que o backend monta; o backend só
+busca dado e formata pro parser, nunca desenha PDF. DRE identifica
+receita/despesa pelo padrão de nomes de conta do Domínio (não por um campo
+próprio) — verificado ao vivo batendo cent-a-cent com o Resumo do Balancete do
+Domínio real.
+
+### C6 — Relatórios Razão + Livro Diário
+
+Razão: saldo anterior de uma conta analítica + cada movimento em ordem
+cronológica com saldo corrente + saldo atual — mesmo motor de PDF do C5.
+Livro Diário: lista cronológica de todos os lançamentos do período (não por
+conta). Os dois avisam explicitamente quando o período é de Balancete
+(fechado sem lançamento manual) em vez de fingir que o número mostrado é a
+escrituração completa do mês.
+
+### C7 — Exportar pro Domínio + fechar período
+
+`dominio/exporter.ts` ganha `buildDominioFileFromLancamentos` (ao lado da
+função já existente do módulo Importação, sem alterá-la): um lançamento com
+mais de um débito ou crédito é **decomposto em pares elementares** D/C
+(greedy, consumindo o mínimo de cada fila ordenada por `ordem`) — abordagem
+escolhida com o usuário por ser a única capaz de reproduzir o formato 1:1 já
+homologado quando não há partida múltipla; sequência dos registros 02/03 vira
+um contador único corrido (a regra documentada de "par/ímpar" era só um
+artefato do formato antigo). **Pendente de confirmação contra um import real
+do Domínio com partida múltipla** — ver `docs/leiaute-dominio.md`. Ação
+`POST /periodos/:id/fechar` (mínimo necessário: bloqueia sem lançamento,
+recalcula saldo antes de marcar fechado) introduzida aqui — guarda-corpos e
+trilha de auditoria completos ficaram pro C10, de propósito.
+
+### C8 — Importar lançamentos do módulo Importação
+
+Primeira ponte NA OUTRA DIREÇÃO: `POST /lancamentos/importar-transacoes` pega
+transações já revisadas no módulo Importação (extrato → conta contábil por
+linha) e gera lançamento de partida dobrada, pro cliente que escritura pelo
+Contábil sem digitar tudo de novo. `lancamentos.origem_transaction_id`
+(nullable, `unique`, `on delete set null`) rastreia a origem e garante
+idempotência de graça — reimportar o extrato de origem não duplica nem apaga
+o lançamento já gerado, só perde o selo de origem. Transação sem conta
+resolvida (banco ou contrapartida) é pulada com aviso, nunca lançamento "pela
+metade" (`lancamento_partidas.plano_conta_id` é `not null`).
+
+### C9 — Lançamentos recorrentes
+
+Escopo decidido com o usuário: **modelo genérico**, não calculadoras de
+depreciação/pró-labore/folha com lógica tributária própria.
+`lancamento_modelos` + `lancamento_modelo_partidas` guardam nome + histórico +
+partidas com **valor opcional** (fixo quando sempre igual, em branco quando
+varia a cada geração). "Gerar lançamento a partir de um modelo" não é uma ação
+de backend — é o frontend pré-preenchendo o formulário normal de lançamento
+(`LancamentoModal`) a partir do modelo escolhido; salvar passa pelo
+`POST /lancamentos` de sempre, reaproveitando 100% da validação existente.
+Tela própria `/contabil/modelos` (CRUD).
+
+### C10 — Trilha de auditoria + guarda-corpos + diagnóstico
+
+`contabil_auditoria` (append-only — só policy de `select`/`insert`, nunca
+`update`/`delete`) registra `fechado`/`reaberto`/`dominio_exportado` com um
+`detalhe jsonb` por evento. Guarda-corpo novo no fechamento: não fecha um
+período se o anterior do mesmo cliente ainda estiver aberto (senão o saldo
+anterior dele pode mudar depois de já fechado/exportado). `POST
+/periodos/:id/reabrir` (novo, reabertura simples decidida com o usuário — sem
+bloqueio mesmo se já exportado, só registra) tem o guarda-corpo espelhado: não
+reabre se um período posterior já está fechado. Os dois protegem a mesma
+invariante ("períodos fechados formam um prefixo cronológico contíguo") a
+partir de lados opostos. `GET /periodos/:id/diagnostico` expõe os dois avisos
++ a trilha de eventos ANTES do usuário tentar a ação e falhar.
+
+### C11 — Acabamento
+
+Sub-nav (barra lateral com submenu do módulo) já cabia bem com os 9 itens do
+Contábil em desktop e no menu-gaveta mobile — verificado ao vivo, sem mudança.
+Mobile: a linha de partida (tipo D/C + conta + valor) do formulário de
+lançamento e de modelo ficava ilegível em telas estreitas — corrigido
+empilhando o `<select>` de conta em linha própria abaixo do breakpoint `sm:`
+(só Tailwind, sem componente novo); acerto de `min-w-0` necessário porque um
+item flex não encolhe abaixo do seu conteúdo mínimo por padrão, o que
+inicialmente quebrava o layout também em desktop. Barra de ações da tela de
+Lançamentos reorganizada em coluna no mobile. Este documento.
+
 ## Milestone 4 — entregue
 
 - `/revisao/:id` editável: por linha → conta contábil, código de histórico,

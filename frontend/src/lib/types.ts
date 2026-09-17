@@ -165,9 +165,50 @@ export type Lancamento = {
   data: string;
   historico_codigo: string | null;
   historico_complemento: string;
+  origem_transaction_id: string | null;
   partidas: LancamentoPartida[];
   created_at: string;
   updated_at: string;
+};
+
+export type LancamentoModeloPartida = {
+  id: string;
+  plano_conta_id: string;
+  tipo: NaturezaDC;
+  valor_cents_padrao: number | null;
+  ordem: number;
+  plano_conta?: Pick<PlanoConta, 'codigo' | 'nome'> | null;
+};
+
+export type LancamentoModelo = {
+  id: string;
+  client_id: string;
+  nome: string;
+  historico_codigo: string | null;
+  historico_complemento: string;
+  ativo: boolean;
+  partidas: LancamentoModeloPartida[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type AcaoAuditoria = 'fechado' | 'reaberto' | 'dominio_exportado';
+
+export type EventoAuditoria = {
+  id: string;
+  acao: AcaoAuditoria;
+  detalhe: Record<string, unknown>;
+  created_at: string;
+};
+
+export type PeriodoRef = { id: string; ano: number; mes: number };
+
+export type DiagnosticoPeriodo = {
+  periodo: PeriodoContabil;
+  qtd_lancamentos: number;
+  periodo_anterior_aberto: PeriodoRef | null;
+  periodo_posterior_fechado: PeriodoRef | null;
+  eventos: EventoAuditoria[];
 };
 
 export type GrupoDre = { raiz: SaldoContabil; linhas: SaldoContabil[] };
