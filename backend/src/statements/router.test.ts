@@ -155,15 +155,12 @@ describe('POST /statements', () => {
     expect(rows[0]).toMatchObject({ conta_contabil: '4020', origem_preenchimento: 'conferir' });
   });
 
-  it('encadeia: saldo inicial = saldo final do extrato anterior do cliente', async () => {
+  it('sem saldo informado usa o do cadastro, mesmo com extrato anterior (não encadeia)', async () => {
     mockedParser.mockResolvedValue(parseResult);
     const { app, ops } = appWith(
       handlerFor({
         'clients.select': () => ({ id: 'c1', saldo_inicial: '1000.00' }),
-        'statements.select': () => [
-          { saldo_final: '3000.00', period_end: '2026-05-31' },
-          { saldo_final: '5000.00', period_end: '2026-06-30' },
-        ],
+        'statements.select': () => [{ saldo_final: '5000.00', period_end: '2026-06-30' }],
         'statements.insert': () => ({ id: 's1' }),
         'statements.update': () => ({ id: 's1', status: 'revisao', totais: {} }),
         'transactions.insert': () => null,
@@ -178,40 +175,18 @@ describe('POST /statements', () => {
       .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'e.ofx');
 
     const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
-    expect((insert?.payload as { saldo_inicial: number }).saldo_inicial).toBe(5000);
+    expect((insert?.payload as { saldo_inicial: number }).saldo_inicial).toBe(1000);
+    expect(ops.some((o) => o.table === 'statements' && o.verb === 'select')).toBe(false);
 
-    // saldo_final = 5000 + 2340,55 (entrada) − 10,00 (saída) = 7330,55
+    // saldo_final = 1000 + 2340,55 (entrada) − 10,00 (saída) = 3330,55
     const saldoFinal = ops
       .filter((o) => o.table === 'statements' && o.verb === 'update')
       .map((o) => (o.payload as { saldo_final?: number }).saldo_final)
       .find((v) => v != null);
-    expect(saldoFinal).toBe(7330.55);
+    expect(saldoFinal).toBe(3330.55);
   });
 
-  it('primeiro extrato do cliente usa o saldo inicial do cadastro', async () => {
-    mockedParser.mockResolvedValue(parseResult);
-    const { app, ops } = appWith(
-      handlerFor({
-        'clients.select': () => ({ id: 'c1', saldo_inicial: '1234.56' }),
-        'statements.select': () => [],
-        'statements.insert': () => ({ id: 's1' }),
-        'statements.update': () => ({ id: 's1', status: 'revisao', totais: {} }),
-        'transactions.insert': () => null,
-        'transactions.select': () => [{ id: 't1', ordem: 0, direction: 'saida' }],
-      }),
-    );
-
-    await request(app)
-      .post('/statements')
-      .field('client_id', '11111111-1111-1111-1111-111111111111')
-      .field('banco_conta_contabil', '10002')
-      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'e.ofx');
-
-    const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
-    expect((insert?.payload as { saldo_inicial: number }).saldo_inicial).toBe(1234.56);
-  });
-
-  it('saldo inicial informado na importação tem prioridade sobre o encadeado', async () => {
+  it('saldo inicial informado na importação tem prioridade sobre o do cadastro', async () => {
     mockedParser.mockResolvedValue(parseResult);
     const { app, ops } = appWith(
       handlerFor({
@@ -316,6 +291,28 @@ describe('POST /statements/classificar', () => {
     const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
     expect(insert?.payload).toMatchObject({ origem_modulo: 'classificacao' });
     expect(insert?.payload).not.toHaveProperty('banco_conta_contabil');
+  });
+
+  it('saldo inicial vem do cadastro, não do extrato anterior', async () => {
+    mockedParser.mockResolvedValue(parseResult);
+    const { app, ops } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1', saldo_inicial: '1000.00' }),
+        'statements.select': () => [{ saldo_final: '5000.00', period_end: '2026-06-30' }],
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': () => ({ id: 's1', status: 'classificacao', totais: {} }),
+        'transactions.insert': () => null,
+        'transactions.select': () => [{ id: 't1', ordem: 0, direction: 'saida' }],
+      }),
+    );
+
+    await request(app)
+      .post('/statements/classificar')
+      .field('client_id', '11111111-1111-1111-1111-111111111111')
+      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'extrato.ofx');
+
+    const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
+    expect((insert?.payload as { saldo_inicial: number }).saldo_inicial).toBe(1000);
   });
 
   it('404 quando o cliente não é do usuário', async () => {

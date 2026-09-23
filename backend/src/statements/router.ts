@@ -83,30 +83,6 @@ function buildTotais(txns: ParseResult['transactions']) {
 }
 
 /**
- * Conciliação encadeada: o saldo inicial de um extrato novo é o saldo final
- * do extrato anterior do cliente (mesmo se aquele nasceu no módulo
- * Classificação). Só cai no valor do cadastro no primeiro extrato do cliente.
- */
-async function resolveSaldoInicial(
-  supabase: SupabaseClient,
-  clientId: string,
-  saldoInformado: number | undefined,
-  saldoCadastro: number,
-): Promise<number> {
-  if (saldoInformado != null) return saldoInformado;
-  const { data: anteriores } = await supabase
-    .from('statements')
-    .select('saldo_final, period_end')
-    .eq('client_id', clientId)
-    .order('period_end', { ascending: false })
-    .limit(24);
-  const prev = (anteriores ?? [])
-    .filter((s) => s.saldo_final != null)
-    .sort((a, b) => String(b.period_end ?? '').localeCompare(String(a.period_end ?? '')))[0];
-  return prev ? Number(prev.saldo_final) : Number(saldoCadastro ?? 0);
-}
-
-/**
  * Classifica os lançamentos lidos (memória do cliente), grava na `transactions`
  * e finaliza o `statement` (período, totais, saldo_final, status final dado).
  * Usado pela importação nova, pela reimportação e pelo módulo Classificação.
@@ -218,12 +194,10 @@ statementsRouter.post('/', upload.single('file'), async (req, res, next) => {
     if (cErr) throw mapPgrstError(cErr, 'validar cliente');
     if (!client) throw notFound('Cliente não encontrado');
 
-    const saldoInicial = await resolveSaldoInicial(
-      supabase,
-      dto.client_id,
-      dto.saldo_inicial,
-      Number(client.saldo_inicial ?? 0),
-    );
+    // Só o que o operador informou: digitado na importação, senão o do cadastro.
+    // Não encadeia do saldo final do extrato anterior — isso trazia saldo de
+    // outro mês/conta sem o operador perceber.
+    const saldoInicial = dto.saldo_inicial ?? Number(client.saldo_inicial ?? 0);
 
     // cria o statement (parsing)
     const { data: stmt, error: sErr } = await supabase
@@ -326,12 +300,7 @@ statementsRouter.post('/classificar', upload.single('file'), async (req, res, ne
     if (cErr) throw mapPgrstError(cErr, 'validar cliente');
     if (!client) throw notFound('Cliente não encontrado');
 
-    const saldoInicial = await resolveSaldoInicial(
-      supabase,
-      dto.client_id,
-      undefined,
-      Number(client.saldo_inicial ?? 0),
-    );
+    const saldoInicial = Number(client.saldo_inicial ?? 0);
 
     const { data: stmt, error: sErr } = await supabase
       .from('statements')

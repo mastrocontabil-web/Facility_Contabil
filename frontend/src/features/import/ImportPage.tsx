@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiError } from '@/lib/api';
-import { formatDate, formatMoney } from '@/lib/format';
+import { formatMoney } from '@/lib/format';
 import { useClients } from '@/features/clients/api';
 import {
   useCreateStatement,
-  useStatements,
   useUpdateStatementHeader,
   type ImportResult,
 } from '@/features/statements/api';
@@ -65,19 +64,6 @@ export function ImportPage() {
     [clients, clientId],
   );
 
-  // Extratos anteriores do cliente — pra encadear o saldo (fecha um mês, abre o próximo).
-  const { data: clientStmts } = useStatements(
-    { client_id: clientId },
-    { enabled: !!clientId },
-  );
-  const extratoAnterior = useMemo(() => {
-    const comSaldo = (clientStmts ?? []).filter((s) => s.saldo_final != null);
-    if (!comSaldo.length) return null;
-    return [...comSaldo].sort((a, b) =>
-      String(b.period_end ?? b.created_at).localeCompare(String(a.period_end ?? a.created_at)),
-    )[0];
-  }, [clientStmts]);
-
   useEffect(() => {
     if (selected) {
       setContaBanco(selected.banco_conta_contabil ?? '');
@@ -86,18 +72,19 @@ export function ImportPage() {
     }
   }, [selected]);
 
-  // Ao trocar de cliente, volta a preencher o saldo automaticamente.
+  // Trocar de um cliente pra outro volta a preencher com o cadastro do novo (o
+  // digitado valia pro anterior); escolher o primeiro cliente não apaga o digitado.
+  const clienteAnterior = useRef('');
   useEffect(() => {
-    saldoTocado.current = false;
+    if (clienteAnterior.current && clienteAnterior.current !== clientId) saldoTocado.current = false;
+    clienteAnterior.current = clientId;
   }, [clientId]);
 
-  // Saldo inicial = saldo final do último extrato do cliente; senão, o do cadastro.
+  // Saldo inicial = o do cadastro do cliente, até o operador digitar outro.
   useEffect(() => {
     if (!selected || saldoTocado.current) return;
-    setSaldoInicial(
-      moneyToInput(extratoAnterior?.saldo_final ?? selected.saldo_inicial ?? 0),
-    );
-  }, [selected, extratoAnterior]);
+    setSaldoInicial(moneyToInput(selected.saldo_inicial ?? 0));
+  }, [selected]);
 
   const isPdf = file?.name.toLowerCase().endsWith('.pdf');
   const canSubmit = clientId && contaBanco.trim() && file && !createMut.isPending;
@@ -285,20 +272,11 @@ export function ImportPage() {
               }}
               placeholder="0,00"
             />
-            {selected && extratoAnterior ? (
-              <p className="mt-1 text-xs text-slate-400">
-                Continua do extrato anterior deste cliente
-                {extratoAnterior.period_end ? ` (até ${formatDate(extratoAnterior.period_end)})` : ''} —
-                saldo final {formatMoney(Math.round(Number(extratoAnterior.saldo_final) * 100))}. Ajuste
-                se precisar.
-              </p>
-            ) : (
-              <p className="mt-1 text-xs text-slate-400">
-                {selected
-                  ? 'Primeiro extrato deste cliente — usando o saldo inicial do cadastro.'
-                  : 'Vem do último extrato do cliente (ou do cadastro, no primeiro). Serve para conferir o saldo do fim do mês.'}
-              </p>
-            )}
+            <p className="mt-1 text-xs text-slate-400">
+              {selected
+                ? `Cadastro do cliente: ${formatMoney(Math.round(Number(selected.saldo_inicial ?? 0) * 100))}. Se o extrato começa com outro saldo, digite aqui — vale o que estiver neste campo.`
+                : 'Vem do cadastro do cliente; digite outro se o extrato começar com saldo diferente. Serve para conferir o saldo do fim do mês.'}
+            </p>
           </div>
 
           <div>
