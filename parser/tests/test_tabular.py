@@ -2,10 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.parsers import parse_statement
+import pytest
+
+from app.parsers import NotAStatementError, parse_statement
 from app.parsers.tabular import parse_csv
 
 FIX = Path(__file__).parent / "fixtures"
+
+# Relatório de vendas do Mercado Pago (1ª linha em branco, como vem do banco).
+MP_RELATORIO_VENDAS = (
+    "\n"
+    "OPERATION_DATETIME;RELEASE_DATETIME;MOVEMENT_TYPE;PAYMENT_ID;LOCAL;CHARGE_METHOD;"
+    "PAYMENT_METHOD_DETAIL;PAYMENT_METHOD;GROSS_VALUE;SALES_DISCOUNTS;NET\n"
+    "01-08-2026 08:47:55;01-08-2026 08:47:53;Pagamento;100000000001;Loja;Point;Visa;;10,50;-0,12;10,38\n"
+).encode("utf-8-sig")
 
 
 def _totais(r):
@@ -42,6 +52,13 @@ def test_generico_debito_credito():
     ne, ve, ns, vs = _totais(r)
     assert (ne, ve) == (1, 50000)
     assert (ns, vs) == (2, 2990 + 15000)
+
+
+def test_relatorio_de_vendas_do_mercado_pago_nao_e_extrato():
+    # só tem os recebimentos (maquininha/QR) — lido como extrato, a conta
+    # ficaria sem as saídas e o saldo nunca fecharia
+    with pytest.raises(NotAStatementError, match="relatório de vendas do Mercado Pago"):
+        parse_csv(MP_RELATORIO_VENDAS)
 
 
 def test_detecta_ofx_como_csv_txt(tmp_path):

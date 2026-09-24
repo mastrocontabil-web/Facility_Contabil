@@ -33,11 +33,26 @@ BALANCE_HEADERS = {"saldo", "saldo (r$)", "balance", "saldo apos"}
 Rows = list[list[str]]
 
 
+class NotAStatementError(Exception):
+    """Arquivo reconhecido, mas não é extrato bancário (ex.: relatório de vendas)."""
+
+
+# Relatório de vendas do Mercado Pago: só os recebimentos (maquininha/QR), sem
+# as saídas da conta — lido como extrato, daria contabilidade e saldo pela metade.
+_MP_RELATORIO_VENDAS = {"operation_datetime", "release_datetime", "payment_id", "gross_value", "net"}
+
+
 def rows_to_result(rows: Rows, fmt: str) -> ParseResult:
     """Recebe as linhas já como lista de listas de strings e monta o resultado."""
     rows = [r for r in rows if any(str(c).strip() for c in r)]
     if not rows:
         return ParseResult(format=fmt, warnings=["arquivo sem linhas"])
+
+    if any(_MP_RELATORIO_VENDAS <= {_norm(c) for c in r} for r in rows[:5]):
+        raise NotAStatementError(
+            "esse arquivo é o relatório de vendas do Mercado Pago (só os recebimentos, sem as "
+            'saídas), não o extrato da conta — suba o PDF "Extrato de conta" do Mercado Pago'
+        )
 
     header_idx = _find_header(rows)
     warnings: list[str] = []

@@ -13,10 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from app.parsers import parse_statement
+from app.parsers import NotAStatementError, parse_statement
 from app.parsers.excel import EncryptedFileError
 from app.parsers.ofx import parse_ofx
-from app.parsers.pdf import _MONEY, EncryptedPdfError, _looks_like_bb_extrato_cc, extract_pdf_text
+from app.parsers.pdf import (
+    _MONEY,
+    EncryptedPdfError,
+    _looks_like_bb_extrato_cc,
+    _looks_like_mercadopago,
+    extract_pdf_text,
+)
 
 SEFIP = Path(os.getenv("SEFIP_DIR", r"C:\SEFIP\EXTRATOS"))
 
@@ -59,8 +65,8 @@ def test_formatos_batem(folder: Path):
     for f in files:
         try:
             resultados[f.name] = _parse(f)
-        except EncryptedFileError:
-            pass  # planilha protegida — ok, é pra dar erro claro
+        except (EncryptedFileError, NotAStatementError):
+            pass  # planilha protegida / relatório que não é extrato — ok, é pra dar erro claro
 
     assert resultados, f"{folder.name}: nenhum formato leu"
     ref_nome, ref = next(iter(resultados.items()))
@@ -104,3 +110,37 @@ def test_bb_extrato_cc_fecha_com_o_saldo_impresso():
             f"{f.parent.name}/{f.name}: {n_e} entradas ({ent}) e {n_s} saídas ({sai}) "
             f"não fecham {saldos['Saldo Anterior']} → {saldos['S A L D O']}"
         )
+
+
+_MP_RESUMO_RE = re.compile(rf"(Entradas|Sa[íi]das|Saldo inicial|Saldo final):\s*R\$\s*(-?)({_MONEY})")
+
+
+def test_mercadopago_fecha_com_o_resumo_impresso():
+    """Mesmo caso do BB acima: o "Extrato de conta" do Mercado Pago vem sem
+    OFX/CSV equivalente (o CSV que o banco dá é só o relatório de vendas). A
+    prova é o resumo impresso no topo — total de entradas, de saídas, saldo
+    inicial e final — e o próprio leitor confere a coluna Saldo linha a linha."""
+    casos = []
+    for pasta in _folders():
+        for f in sorted(pasta.iterdir()):
+            if f.suffix.lower() != ".pdf":
+                continue
+            try:
+                texto = extract_pdf_text(f.read_bytes(), None)
+            except EncryptedPdfError:
+                continue
+            if _looks_like_mercadopago(texto):
+                casos.append((f, texto))
+    if not casos:
+        pytest.skip("nenhum PDF Mercado Pago 'Extrato de conta' na bateria")
+
+    for f, texto in casos:
+        resumo = {nome.replace("í", "i"): _cents(v, s or "+") for nome, s, v in _MP_RESUMO_RE.findall(texto)}
+        assert {"Entradas", "Saidas", "Saldo inicial", "Saldo final"} <= resumo.keys(), f"{f}: resumo não achado"
+        r = parse_statement(f.name, f.read_bytes())
+        _, ent, _, sai = _totais(r)
+        onde = f"{f.parent.name}/{f.name}"
+        assert ent == resumo["Entradas"], f"{onde}: entradas lidas {ent} != impressas {resumo['Entradas']}"
+        assert -sai == resumo["Saidas"], f"{onde}: saídas lidas {sai} != impressas {-resumo['Saidas']}"
+        assert resumo["Saldo inicial"] + ent - sai == resumo["Saldo final"], f"{onde}: saldo não fecha"
+        assert not [w for w in r.warnings if "saldo" in w], f"{onde}: {r.warnings}"

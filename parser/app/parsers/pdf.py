@@ -454,6 +454,151 @@ def _parse_bb_extrato_cc_pdf(content: bytes, password: str | None, text: str) ->
 
 
 # --------------------------------------------------------------------------- #
+# Mercado Pago "EXTRATO DE CONTA" — tabela Data/Descrição/ID da operação/Valor/
+# Saldo, data com hífen ("01-08-2026") e valor com sinal ("R$ -1.000,00"). Lido
+# pelas posições, igual ao BB "Extrato de Conta Corrente": cada lançamento fica
+# entre dois separadores horizontais da tabela e a descrição quebra em até 3
+# linhas centralizadas na altura da célula (parte ACIMA da linha da data). Duas
+# pegadinhas vistas no extrato real: o cabeçalho da tabela não se repete em toda
+# página, e uma célula pode começar no fim de uma página e terminar no topo da
+# seguinte. A coluna Saldo confere cada lançamento lido.
+# --------------------------------------------------------------------------- #
+_MP_DATA_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})")
+_MP_VALOR_RE = re.compile(rf"-?{_MONEY}")
+_MP_SALDO_IMPRESSO_RE = re.compile(rf"Saldo (inicial|final):\s*R\$\s*(-?{_MONEY})")
+
+
+def _looks_like_mercadopago(t: str) -> bool:
+    low = t.lower()
+    return "extrato de conta" in low and "detalhe dos movimentos" in low and "id da opera" in low
+
+
+def _mp_colunas(words: list[dict]) -> tuple[float, dict[str, float]] | None:
+    """Topo da linha de cabeçalho da tabela e x0 das colunas Data/Descrição/ID."""
+    for data in (w for w in words if w["text"] == "Data"):
+        x: dict[str, float] = {"data": data["x0"]}
+        for w in words:
+            if abs(w["top"] - data["top"]) >= 2:
+                continue
+            if w["text"].startswith("Descri"):
+                x["desc"] = w["x0"]
+            elif w["text"] == "ID":
+                x["id"] = w["x0"]
+        if len(x) == 3:
+            return data["top"], x
+    return None
+
+
+def _mp_centavos(valor: str) -> int:
+    """'-1.000,00' -> -100000 (centavos, com sinal)."""
+    c = to_cents(Decimal(valor.lstrip("-").replace(".", "").replace(",", ".")))
+    return -c if valor.startswith("-") else c
+
+
+def _mp_texto(words: list[dict]) -> str:
+    """Palavras -> linhas (mesma altura) -> uma frase só: a descrição é um texto
+    único quebrado pela largura da coluna, então as linhas se juntam com espaço."""
+    linhas: list[list[dict]] = []
+    for w in sorted(words, key=lambda w: (w["top"], w["x0"])):
+        if linhas and abs(linhas[-1][0]["top"] - w["top"]) < 2:
+            linhas[-1].append(w)
+        else:
+            linhas.append([w])
+    return " ".join(" ".join(w["text"] for w in sorted(linha, key=lambda w: w["x0"])) for linha in linhas)
+
+
+def _parse_mercadopago_pdf(content: bytes, password: str | None, text: str) -> ParseResult:
+    txns: list[NormalizedTransaction] = []
+    seen: list[date] = []
+    avisos: list[str] = []
+    impressos = {nome: _mp_centavos(v) for nome, v in _MP_SALDO_IMPRESSO_RE.findall(text)}
+    saldo = impressos.get("inicial")
+    x: dict[str, float] | None = None
+    pendente = ""  # começo de descrição que ficou no fim da página anterior
+
+    with open_pdf(content, password) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            cab = _mp_colunas(words)
+            if cab is not None:
+                topo, x = cab
+            elif x is None:
+                continue  # a tabela ainda não começou
+            else:
+                topo = 0.0  # página sem o cabeçalho: a tabela vem desde o topo
+            seps = [
+                topo,
+                *sorted({round(e["top"], 1) for e in page.edges if e["orientation"] == "h" and e["top"] > topo}),
+                page.height,
+            ]
+
+            for a, b in zip(seps, seps[1:]):
+                faixa = [w for w in words if a <= w["top"] < b]
+                na_coluna = [w for w in faixa if x["desc"] - 1 <= w["x0"] < x["id"] - 1]
+                datas = [w for w in faixa if abs(w["x0"] - x["data"]) < 3 and _MP_DATA_RE.fullmatch(w["text"])]
+                if not datas:
+                    # célula quebrada entre páginas: guarda o texto pro lançamento
+                    # seguinte. Linha com texto fora da coluna (rodapé) não entra.
+                    fora = [w for w in faixa if w not in na_coluna]
+                    resto = [w for w in na_coluna if not any(abs(f["top"] - w["top"]) < 2 for f in fora)]
+                    if resto:
+                        pendente = f"{pendente} {_mp_texto(resto)}".strip()
+                    continue
+
+                for dw in datas:
+                    linha = [w for w in faixa if abs(w["top"] - dw["top"]) < 2]
+                    valores = sorted(
+                        (w for w in linha if w["x0"] > x["id"] and _MP_VALOR_RE.fullmatch(w["text"])),
+                        key=lambda w: w["x0"],
+                    )
+                    if len(valores) < 2:  # Valor + Saldo
+                        continue
+                    valor = _mp_centavos(valores[0]["text"])
+                    saldo_linha = _mp_centavos(valores[-1]["text"])
+                    # sem separador entre dois lançamentos, cada um fica só com a própria linha
+                    desc_ws = na_coluna if len(datas) == 1 else [w for w in na_coluna if w in linha]
+                    desc = re.sub(r"\s+", " ", f"{pendente} {_mp_texto(desc_ws)}").strip()
+                    pendente = ""
+                    ident = next(
+                        (w["text"] for w in linha if abs(w["x0"] - x["id"]) < 3 and w["text"].isdigit()), ""
+                    )
+
+                    if saldo is not None and saldo + valor != saldo_linha:
+                        avisos.append(
+                            f"lançamento de {dw['text'].replace('-', '/')} (ID {ident}): o valor lido não "
+                            "fecha com o saldo impresso na linha — confira esse lançamento"
+                        )
+                    saldo = saldo_linha
+
+                    dia, mes, ano = (int(g) for g in _MP_DATA_RE.fullmatch(dw["text"]).groups())
+                    try:
+                        d = date(ano, mes, dia)
+                    except ValueError:
+                        continue
+                    if valor == 0:
+                        continue
+                    seen.append(d)
+                    txns.append(
+                        NormalizedTransaction(
+                            date=d.isoformat(),
+                            description=desc,
+                            amount_cents=abs(valor),
+                            direction="saida" if valor < 0 else "entrada",
+                            raw={"ordem": len(txns), "id_operacao": ident},
+                        )
+                    )
+
+    if txns and "final" in impressos and saldo != impressos["final"]:
+        avisos.append(
+            "o saldo do último lançamento lido não bate com o saldo final impresso no extrato — "
+            "pode estar faltando lançamento"
+        )
+    r = _result(text, txns, seen)
+    r.warnings = [*avisos, *r.warnings]
+    return r
+
+
+# --------------------------------------------------------------------------- #
 # Layout genérico "assinado": data + descrição + valor (com sinal) [+ saldo]
 # Cobre Bradesco, Inter, C6, Santander, PagBank, BB (app), Itaú, ...
 # --------------------------------------------------------------------------- #
@@ -601,6 +746,10 @@ def _result(text: str, txns: list[NormalizedTransaction], seen: list[date]) -> P
 def parse_pdf(content: bytes, password: str | None = None) -> ParseResult:
     text = extract_pdf_text(content, password)
 
+    if _looks_like_mercadopago(text):
+        r = _parse_mercadopago_pdf(content, password, text)
+        if r.transactions:
+            return r
     if _looks_like_nubank(text):
         return _parse_nubank_pdf(text)
     if _looks_like_sicoob(text):

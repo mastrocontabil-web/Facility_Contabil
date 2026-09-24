@@ -9,6 +9,7 @@ from .config import MAX_UPLOAD_BYTES
 from .parsers import (
     EncryptedFileError,
     EncryptedPdfError,
+    NotAStatementError,
     UnsupportedFormatError,
     parse_balancete_pdf,
     parse_plano_contas_pdf,
@@ -64,6 +65,8 @@ async def parse(
         return JSONResponse(
             status_code=422, content={"error": str(exc), "code": "encrypted"}
         )
+    except NotAStatementError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc), "code": "not_statement"})
     except UnreadablePdfError as exc:
         return JSONResponse(status_code=422, content={"error": str(exc), "code": "unreadable"})
     except Exception as exc:  # noqa: BLE001

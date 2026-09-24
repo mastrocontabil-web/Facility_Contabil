@@ -288,12 +288,18 @@ backend, 26 no parser.
 | Banco C6 | ✅ | — | ✅ |
 | Sicoob | — | — | ✅ (valor com sufixo C/D) |
 | PagBank | ✅ | ✅ | ✅ |
+| Mercado Pago ("Extrato de conta") | — | ❌ relatório de vendas (recusado com aviso) | ✅ (confere o saldo linha a linha) |
 | genérico (outros) | ✅ | ✅ (heurística) | melhor esforço + aviso |
 
 Para cada pasta em `C:\SEFIP\EXTRATOS` com OFX, o teste
 `test_sefip_bancos.py` confere que CSV e PDF dão o MESMO resultado do OFX.
 Pasta só com o PDF do BB "Extrato de Conta Corrente" é conferida pelo próprio
 extrato: saldo anterior + entradas − saídas tem que dar o saldo final impresso.
+O PDF do Mercado Pago também: entradas, saídas, saldo inicial e final têm que
+bater com o resumo impresso no topo, e o leitor confere a coluna Saldo a cada
+lançamento (avisa a linha que não fecha). O CSV que o Mercado Pago dá é o
+relatório de vendas — só os recebimentos, sem as saídas — e é recusado com uma
+mensagem clara em vez de virar um extrato pela metade.
 XLS/XLSX: leitor genérico + detecção de planilha protegida (C6).
 
 ### Bugs corrigidos no caminho

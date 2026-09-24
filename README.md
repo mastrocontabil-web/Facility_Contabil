@@ -161,7 +161,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **274 testes no backend**, **53 no parser**.
+Hoje: **274 testes no backend**, **67 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -185,7 +185,8 @@ caminho não existe (não quebra em outra máquina).
 - **2** — CRUD de clientes isolado por usuário, validação de CNPJ/CPF.
 - **3** — upload + parser (OFX/CSV/XLS/XLSX/PDF) + tela de importação. Leitura
   verificada contra extratos reais de **Nubank, BB, Itaú, Inter, Bradesco,
-  Santander, C6, Sicoob e PagBank** (PDF/CSV batendo com o OFX).
+  Santander, C6, Sicoob, PagBank e Mercado Pago** (PDF/CSV batendo com o OFX, ou
+  com o resumo impresso no próprio extrato quando o banco só dá PDF).
 - **4** — tela de Revisão: edição inline, ações em massa, **inativar** lançamentos,
   modo do complemento, conferência do **saldo bancário** encadeado entre extratos.
 - **5** — **memória de classificação automática**: ao salvar a revisão, cada

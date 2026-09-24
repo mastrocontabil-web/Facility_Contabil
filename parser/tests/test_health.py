@@ -43,3 +43,13 @@ def test_parse_csv_ok():
 def test_parse_pdf_texto_invalido_da_422():
     r = client.post("/parse", files={"file": ("x.pdf", b"%PDF-1.4 lixo", "application/pdf")})
     assert r.status_code == 422
+
+
+def test_parse_relatorio_de_vendas_da_422_com_motivo():
+    from tests.test_tabular import MP_RELATORIO_VENDAS
+
+    r = client.post("/parse", files={"file": ("vendas.csv", MP_RELATORIO_VENDAS, "text/csv")})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "not_statement"
+    assert "relatório de vendas" in body["error"]

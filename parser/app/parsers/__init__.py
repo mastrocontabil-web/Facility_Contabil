@@ -7,7 +7,7 @@ from .excel import EncryptedFileError, parse_xls, parse_xlsx
 from .ofx import parse_ofx
 from .pdf import EncryptedPdfError, UnreadablePdfError, parse_pdf
 from .plano_contas import parse_plano_contas_pdf
-from .tabular import parse_csv
+from .tabular import NotAStatementError, parse_csv
 
 __all__ = [
     "detect_format",
@@ -17,6 +17,7 @@ __all__ = [
     "UnsupportedFormatError",
     "EncryptedFileError",
     "EncryptedPdfError",
+    "NotAStatementError",
     "UnreadablePdfError",
 ]
 
