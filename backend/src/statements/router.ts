@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { LIMITE_LINHAS, lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -71,6 +71,19 @@ function sanitizeName(name: string): string {
   return `${base || 'extrato'}${ext}`;
 }
 
+/** Por que o resultado do parser não pode ser gravado — null quando pode. */
+function motivoRecusa(parseErr: unknown, parsed: ParseResult | null): string | null {
+  if (parseErr) return parseErr instanceof Error ? parseErr.message : 'falha ao ler o extrato';
+  if (!parsed?.transactions.length) return parsed?.warnings[0] ?? 'Nenhum lançamento encontrado no extrato';
+  if (parsed.transactions.length > LIMITE_LINHAS) {
+    return (
+      `O extrato tem ${parsed.transactions.length.toLocaleString('pt-BR')} lançamentos — o limite é ` +
+      `${LIMITE_LINHAS.toLocaleString('pt-BR')}. Divida em períodos menores.`
+    );
+  }
+  return null;
+}
+
 function buildTotais(txns: ParseResult['transactions']) {
   const entradas = txns.filter((t) => t.direction === 'entrada');
   const saidas = txns.filter((t) => t.direction === 'saida');
@@ -103,14 +116,26 @@ async function gravarLancamentos(
     statusFinal: 'revisao' | 'classificacao';
   },
 ) {
-  const { data: rulesRaw } = await supabase
-    .from('mapping_rules')
-    .select(
-      'id, direction, match_type, pattern, conta_contabil, hist_code, hist_complemento_template, prioridade, hits, last_used_at',
-    )
-    .eq('client_id', p.clientId)
-    .eq('ativo', true);
-  const rules = (rulesRaw ?? []) as Rule[];
+  // memória só ajuda a pré-preencher: se a leitura falhar, grava sem ela
+  let rules: Rule[] = [];
+  try {
+    rules = await lerTodas<Rule>(
+      (de, ate) =>
+        supabase
+          .from('mapping_rules')
+          .select(
+            'id, direction, match_type, pattern, conta_contabil, hist_code, hist_complemento_template, prioridade, hits, last_used_at',
+          )
+          .eq('client_id', p.clientId)
+          .eq('ativo', true)
+          .order('id')
+          .range(de, ate),
+      'ler as memórias do cliente',
+      { passouDoLimite: 'avisar' },
+    );
+  } catch (err) {
+    logger.warn({ err }, 'falha ao ler memórias (segue sem pré-preencher)');
+  }
 
   const rows = p.parsed.transactions.map((t, i) => {
     const m = classify(rules, { direction: t.direction, description: t.description });
@@ -159,13 +184,13 @@ async function gravarLancamentos(
     .single();
   if (uErr) throw mapPgrstError(uErr, 'finalizar importação');
 
-  const { data: transactions } = await supabase
-    .from('transactions')
-    .select(TXN_COLS)
-    .eq('statement_id', p.statementId)
-    .order('ordem');
+  const transactions = await lerTodas(
+    (de, ate) =>
+      supabase.from('transactions').select(TXN_COLS).eq('statement_id', p.statementId).order('ordem').range(de, ate),
+    'reler os lançamentos',
+  );
 
-  return { statement, transactions: transactions ?? [] };
+  return { statement, transactions };
 }
 
 // --------------------------------------------------------------------------- #
@@ -242,12 +267,9 @@ statementsRouter.post('/', upload.single('file'), async (req, res, next) => {
       parseErr = e;
     }
 
-    if (parseErr || !parsed || parsed.transactions.length === 0) {
-      const msg = parseErr
-        ? parseErr instanceof Error
-          ? parseErr.message
-          : 'falha ao ler o extrato'
-        : (parsed?.warnings[0] ?? 'Nenhum lançamento encontrado no extrato');
+    const recusa = motivoRecusa(parseErr, parsed);
+    if (recusa || !parsed) {
+      const msg = recusa ?? 'falha ao ler o extrato';
       await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
       next(parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] }));
       return;
@@ -339,12 +361,9 @@ statementsRouter.post('/classificar', upload.single('file'), async (req, res, ne
       parseErr = e;
     }
 
-    if (parseErr || !parsed || parsed.transactions.length === 0) {
-      const msg = parseErr
-        ? parseErr instanceof Error
-          ? parseErr.message
-          : 'falha ao ler o extrato'
-        : (parsed?.warnings[0] ?? 'Nenhum lançamento encontrado no extrato');
+    const recusa = motivoRecusa(parseErr, parsed);
+    if (recusa || !parsed) {
+      const msg = recusa ?? 'falha ao ler o extrato';
       await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
       next(parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] }));
       return;
@@ -414,12 +433,9 @@ statementsRouter.post('/:id/reimport', upload.single('file'), async (req, res, n
       parseErr = e;
     }
 
-    if (parseErr || !parsed || parsed.transactions.length === 0) {
-      const msg = parseErr
-        ? parseErr instanceof Error
-          ? parseErr.message
-          : 'falha ao ler o extrato'
-        : (parsed?.warnings[0] ?? 'Nenhum lançamento encontrado no extrato');
+    const recusa = motivoRecusa(parseErr, parsed);
+    if (recusa || !parsed) {
+      const msg = recusa ?? 'falha ao ler o extrato';
       await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
       next(parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] }));
       return;
@@ -488,14 +504,13 @@ statementsRouter.get('/:id', async (req, res, next) => {
     if (error) throw mapPgrstError(error, 'buscar importação');
     if (!stmt) throw notFound('Importação não encontrada');
 
-    const { data: txns, error: tErr } = await supabase
-      .from('transactions')
-      .select(TXN_COLS)
-      .eq('statement_id', req.params.id)
-      .order('ordem');
-    if (tErr) throw mapPgrstError(tErr, 'buscar lançamentos');
+    const txns = await lerTodas(
+      (de, ate) =>
+        supabase.from('transactions').select(TXN_COLS).eq('statement_id', req.params.id).order('ordem').range(de, ate),
+      'buscar lançamentos',
+    );
 
-    res.json({ statement: stmt, transactions: txns ?? [] });
+    res.json({ statement: stmt, transactions: txns });
   } catch (err) {
     next(err);
   }
@@ -523,16 +538,20 @@ statementsRouter.post('/:id/export', async (req, res, next) => {
     const client = clientRaw as { dominio_code: string; cnpj: string } | null | undefined;
     if (!client) throw badRequest('Cliente da importação não encontrado.');
 
-    const { data: txns, error: tErr } = await supabase
-      .from('transactions')
-      .select(
-        'ordem, data, direction, valor, conta_contabil, hist_code, descricao_raw, hist_complemento, ignorado, classificacao:classificacoes(nome)',
-      )
-      .eq('statement_id', statementId)
-      .order('ordem');
-    if (tErr) throw mapPgrstError(tErr, 'buscar lançamentos');
+    const txns = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from('transactions')
+          .select(
+            'ordem, data, direction, valor, conta_contabil, hist_code, descricao_raw, hist_complemento, ignorado, classificacao:classificacoes(nome)',
+          )
+          .eq('statement_id', statementId)
+          .order('ordem')
+          .range(de, ate),
+      'buscar lançamentos',
+    );
 
-    const ativos = (txns ?? []).filter((t) => !t.ignorado);
+    const ativos = txns.filter((t) => !t.ignorado);
     if (!ativos.length) throw badRequest('Nenhum lançamento ativo para exportar.');
 
     const pendentes = ativos.filter(
@@ -627,12 +646,11 @@ statementsRouter.patch('/:id/transactions', async (req, res, next) => {
     if (!affected) throw notFound('Nenhum lançamento atualizado (importação não encontrada?)');
 
     // recalcula os totais (só os não-ignorados) e devolve tudo fresco
-    const { data: txns, error: tErr } = await supabase
-      .from('transactions')
-      .select(TXN_COLS)
-      .eq('statement_id', statementId)
-      .order('ordem');
-    if (tErr) throw mapPgrstError(tErr, 'recarregar lançamentos');
+    const txns = await lerTodas(
+      (de, ate) =>
+        supabase.from('transactions').select(TXN_COLS).eq('statement_id', statementId).order('ordem').range(de, ate),
+      'recarregar lançamentos',
+    );
 
     const { data: cur } = await supabase
       .from('statements')
@@ -642,7 +660,7 @@ statementsRouter.patch('/:id/transactions', async (req, res, next) => {
 
     // aprende: cada lançamento classificado vira memória do cliente
     if (cur?.client_id) {
-      const memorias = (txns ?? [])
+      const memorias = txns
         .filter((t) => !t.ignorado && String(t.conta_contabil ?? '').trim())
         .map((t) => ({
           direction: t.direction,
@@ -660,21 +678,21 @@ statementsRouter.patch('/:id/transactions', async (req, res, next) => {
       }
     }
 
-    const ativos = (txns ?? []).filter((t) => !t.ignorado);
+    const ativos = txns.filter((t) => !t.ignorado);
     const ent = ativos.filter((t) => t.direction === 'entrada');
     const sai = ativos.filter((t) => t.direction === 'saida');
     const cents = (arr: typeof ativos) =>
       arr.reduce((a, t) => a + Math.round(Number(t.valor) * 100), 0);
     const totais = {
       qtd: ativos.length,
-      ignorados: (txns ?? []).length - ativos.length,
+      ignorados: txns.length - ativos.length,
       entradas: { n: ent.length, valor_cents: cents(ent) },
       saidas: { n: sai.length, valor_cents: cents(sai) },
     };
 
     // saldo_final acompanha TODOS os lançamentos (inativados inclusos)
     const saldoFinal =
-      (Math.round(Number(cur?.saldo_inicial ?? 0) * 100) + movimentoCents(txns ?? [])) / 100;
+      (Math.round(Number(cur?.saldo_inicial ?? 0) * 100) + movimentoCents(txns)) / 100;
 
     const { data: stmt, error: sErr } = await supabase
       .from('statements')
@@ -684,7 +702,7 @@ statementsRouter.patch('/:id/transactions', async (req, res, next) => {
       .maybeSingle();
     if (sErr) throw mapPgrstError(sErr, 'atualizar totais');
 
-    res.json({ statement: stmt, transactions: txns ?? [], updated: affected });
+    res.json({ statement: stmt, transactions: txns, updated: affected });
   } catch (err) {
     next(err);
   }
@@ -707,14 +725,13 @@ statementsRouter.patch('/:id/classificacao', async (req, res, next) => {
     if (error) throw mapPgrstError(error, 'salvar classificações');
     if (!affected) throw notFound('Nenhum lançamento atualizado (importação não encontrada?)');
 
-    const { data: txns, error: tErr } = await supabase
-      .from('transactions')
-      .select(TXN_COLS)
-      .eq('statement_id', statementId)
-      .order('ordem');
-    if (tErr) throw mapPgrstError(tErr, 'recarregar lançamentos');
+    const txns = await lerTodas(
+      (de, ate) =>
+        supabase.from('transactions').select(TXN_COLS).eq('statement_id', statementId).order('ordem').range(de, ate),
+      'recarregar lançamentos',
+    );
 
-    res.json({ transactions: txns ?? [], updated: affected });
+    res.json({ transactions: txns, updated: affected });
   } catch (err) {
     next(err);
   }
@@ -735,12 +752,17 @@ statementsRouter.patch('/:id', async (req, res, next) => {
 
     // Mexeu no saldo inicial → recalcula o saldo final (base do próximo extrato).
     if (dto.saldo_inicial !== undefined) {
-      const { data: txns } = await supabase
-        .from('transactions')
-        .select('direction, valor')
-        .eq('statement_id', req.params.id);
-      patch.saldo_final =
-        (Math.round(dto.saldo_inicial * 100) + movimentoCents(txns ?? [])) / 100;
+      const txns = await lerTodas(
+        (de, ate) =>
+          supabase
+            .from('transactions')
+            .select('direction, valor')
+            .eq('statement_id', req.params.id)
+            .order('ordem')
+            .range(de, ate),
+        'somar os lançamentos',
+      );
+      patch.saldo_final = (Math.round(dto.saldo_inicial * 100) + movimentoCents(txns)) / 100;
     }
 
     const { data, error } = await supabase

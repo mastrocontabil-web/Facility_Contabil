@@ -17,7 +17,8 @@ export function createApp(): Express {
       credentials: true,
     }),
   );
-  app.use(express.json({ limit: '2mb' }));
+  // salvar a revisão de um extrato grande manda até 10.000 lançamentos de uma vez
+  app.use(express.json({ limit: '10mb' }));
 
   app.use('/api', apiRouter);
 

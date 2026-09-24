@@ -125,12 +125,13 @@ describe('GET /contabil/plano-contas', () => {
     expect(res.status).toBe(400);
   });
 
-  it('lista ordenado por classificação', async () => {
+  it('lista ordenado por classificação (código desempata — lida em páginas)', async () => {
     const { app, ops } = appWith(() => ({ data: [contaSample], error: null }));
     const res = await request(app).get(`/contabil/plano-contas?client_id=${CID}`);
     expect(res.status).toBe(200);
     expect(res.body.contas).toHaveLength(1);
-    expect(ops[0]).toMatchObject({ orderBy: 'classificacao' });
+    expect(ops[0]?.orderCalls.map((o) => o.col)).toEqual(['classificacao', 'codigo']);
+    expect(ops[0]?.range).toEqual([0, 999]);
   });
 });
 
@@ -201,6 +202,25 @@ describe('POST /contabil/plano-contas/importar', () => {
       .field('client_id', CID)
       .attach('file', Buffer.from('%PDF-fake'), 'plano.pdf');
     expect(res.status).toBe(404);
+  });
+
+  it('recusa PDF com mais de 10.000 contas antes de gravar qualquer uma', async () => {
+    const conta = { codigo: '1', tipo: 'A' as const, classificacao: '1', nome: 'CONTA', grau: 1 };
+    mockedParser.mockResolvedValue({
+      items: Array.from({ length: 10_001 }, (_, i) => ({ ...conta, codigo: String(i + 1) })),
+      warnings: [],
+    });
+    const { app, ops, rpcOps } = appWith((op) =>
+      op.table === 'clients' ? { data: { id: CID }, error: null } : { data: [], error: null },
+    );
+    const res = await request(app)
+      .post('/contabil/plano-contas/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'plano.pdf');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/O plano de contas tem 10\.001 contas — o limite é 10\.000/);
+    expect(ops.some((o) => o.verb === 'upsert')).toBe(false);
+    expect(rpcOps).toEqual([]);
   });
 });
 
@@ -296,6 +316,36 @@ describe('POST /contabil/balancete/importar', () => {
       .field('client_id', CID)
       .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
     expect(res.status).toBe(400);
+  });
+
+  it('recusa PDF com mais de 10.000 contas antes de fechar o período', async () => {
+    const linha = {
+      codigo: '1',
+      nome: 'CONTA',
+      tipo: 'A' as const,
+      saldo_anterior_cents: 0,
+      saldo_anterior_natureza: null,
+      debito_cents: 0,
+      credito_cents: 0,
+      saldo_atual_cents: 0,
+      saldo_atual_natureza: null,
+    };
+    mockedBalanceteParser.mockResolvedValue({
+      periodo: { ano: 2026, mes: 6 },
+      items: Array.from({ length: 10_001 }, (_, i) => ({ ...linha, codigo: String(i + 1) })),
+      warnings: [],
+    });
+    const { app, ops } = appWith((op) =>
+      op.table === 'clients' ? { data: { id: CID }, error: null } : { data: null, error: null },
+    );
+    const res = await request(app)
+      .post('/contabil/balancete/importar')
+      .field('client_id', CID)
+      .attach('file', Buffer.from('%PDF-fake'), 'balancete.pdf');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/O balancete tem 10\.001 contas — o limite é 10\.000/);
+    expect(ops.some((o) => o.table === 'periodos_contabeis')).toBe(false); // nem fechou o mês
+    expect(ops.some((o) => o.table === 'saldos_contabeis')).toBe(false);
   });
 
   it('lê o PDF, fecha o período e grava saldos linkando por código (upsert)', async () => {
@@ -424,12 +474,12 @@ describe('GET /contabil/saldos', () => {
     expect(res.status).toBe(400);
   });
 
-  it('lista saldos do período, ordenado por ordem', async () => {
+  it('lista saldos do período, ordenado por ordem (código desempata)', async () => {
     const { app, ops } = appWith(() => ({ data: [saldoSample], error: null }));
     const res = await request(app).get(`/contabil/saldos?periodo_id=${PERIODO_ID}`);
     expect(res.status).toBe(200);
     expect(res.body.saldos).toHaveLength(1);
-    expect(ops[0]).toMatchObject({ orderBy: 'ordem' });
+    expect(ops[0]?.orderCalls.map((o) => o.col)).toEqual(['ordem', 'codigo']);
   });
 });
 
@@ -610,6 +660,7 @@ describe('GET /contabil/lancamentos', () => {
     expect(ops[0]?.orderCalls).toEqual([
       { col: 'data', foreignTable: undefined, ascending: true },
       { col: 'created_at', foreignTable: undefined, ascending: true },
+      { col: 'id', foreignTable: undefined, ascending: undefined }, // desempate da paginação
       { col: 'ordem', foreignTable: 'lancamento_partidas', ascending: true },
     ]);
   });
@@ -1874,6 +1925,25 @@ describe('POST /contabil/lancamentos/importar-transacoes', () => {
       .send({ client_id: CID, ano: 2026, mes: 6 });
     const opTx = ops.find((o) => o.table === 'transactions');
     expect(opTx?.filters).toContainEqual(['ignorado', false]);
+  });
+
+  it('confere as já importadas em lotes de 100 ids (.in() gigante estoura a URL)', async () => {
+    const transacoes = Array.from({ length: 150 }, (_, i) =>
+      transacaoSample({ id: `txn-${i}`, ordem: i }),
+    );
+    const { app, ops } = appWith(
+      montarHandlerFeliz({ transacoes, jaImportadas: ['txn-5', 'txn-120'] }),
+    );
+    const res = await request(app)
+      .post('/contabil/lancamentos/importar-transacoes')
+      .send({ client_id: CID, ano: 2026, mes: 6 });
+    expect(res.status).toBe(200);
+
+    const consultas = ops.filter((o) => o.table === 'lancamentos' && o.verb === 'select');
+    const lotes = consultas.map((o) => (o.filters.find(([col]) => col === 'origem_transaction_id')?.[1] as string[]).length);
+    expect(lotes).toEqual([100, 50]);
+    // as já importadas de qualquer lote ficam de fora (o handler devolve as duas nos dois lotes)
+    expect(res.body.importados).toBe(148);
   });
 
   it('transação já importada é pulada sem virar aviso', async () => {

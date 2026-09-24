@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import { ruleCreateSchema, ruleListQuerySchema, ruleUpdateSchema } from './schema.js';
 
@@ -19,14 +19,20 @@ function db(req: { supabase?: SupabaseClient }): SupabaseClient {
 rulesRouter.get('/', async (req, res, next) => {
   try {
     const { client_id } = ruleListQuerySchema.parse(req.query);
-    const { data, error } = await db(req)
-      .from(TABLE)
-      .select(COLUMNS)
-      .eq('client_id', client_id)
-      .order('pattern', { ascending: true })
-      .order('hits', { ascending: false });
-    if (error) throw mapPgrstError(error, 'listar memórias');
-    res.json({ rules: data ?? [] });
+    const rules = await lerTodas(
+      (de, ate) =>
+        db(req)
+          .from(TABLE)
+          .select(COLUMNS)
+          .eq('client_id', client_id)
+          .order('pattern', { ascending: true })
+          .order('hits', { ascending: false })
+          .order('id')
+          .range(de, ate),
+      'listar memórias',
+      { passouDoLimite: 'avisar' },
+    );
+    res.json({ rules });
   } catch (err) {
     next(err);
   }

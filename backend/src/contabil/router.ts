@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { LIMITE_LINHAS, emLotes, lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import {
   exportarDominioQuerySchema,
@@ -365,19 +365,68 @@ function normalizeModelo(row: ModeloRow) {
   };
 }
 
+/** PDF com mais contas do que o sistema consegue reler do banco: recusa ANTES
+ *  de gravar qualquer coisa (senão gravaria tudo e só daria erro ao reler). */
+function recusarAcimaDoLimite(qtd: number, oQue: string): void {
+  if (qtd > LIMITE_LINHAS) {
+    throw badRequest(
+      `${oQue} tem ${qtd.toLocaleString('pt-BR')} contas — o limite é ${LIMITE_LINHAS.toLocaleString('pt-BR')}.`,
+    );
+  }
+}
+
+/** Saldos do período na ordem do balancete. O código desempata: `ordem` pode
+ *  repetir quando um balancete é importado por cima de um período calculado. */
+function lerSaldos(supabase: SupabaseClient, periodoId: string, contexto: string) {
+  return lerTodas(
+    (de, ate) =>
+      supabase
+        .from(SALDO_TABLE)
+        .select(SALDO_COLS)
+        .eq('periodo_id', periodoId)
+        .order('ordem', { ascending: true })
+        .order('codigo')
+        .range(de, ate),
+    contexto,
+  );
+}
+
+/** Lançamentos do período em ordem cronológica, com as partidas embutidas. */
+async function lerLancamentos(supabase: SupabaseClient, periodoId: string, contexto: string) {
+  const rows = await lerTodas(
+    (de, ate) =>
+      supabase
+        .from(LANC_TABLE)
+        .select(LANC_COLS)
+        .eq('periodo_id', periodoId)
+        .order('data', { ascending: true })
+        .order('created_at', { ascending: true })
+        .order('id')
+        .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE })
+        .range(de, ate),
+    contexto,
+  );
+  return (rows as unknown as LancamentoRow[]).map(normalizeLancamento);
+}
+
 // --------------------------------------------------------------------------- #
 // GET /plano-contas?client_id=  — lista ordenada pela hierarquia
 // --------------------------------------------------------------------------- #
 contabilRouter.get('/plano-contas', async (req, res, next) => {
   try {
     const { client_id } = planoContaListQuerySchema.parse(req.query);
-    const { data, error } = await db(req)
-      .from(PLANO_TABLE)
-      .select(PLANO_COLS)
-      .eq('client_id', client_id)
-      .order('classificacao', { ascending: true });
-    if (error) throw mapPgrstError(error, 'listar plano de contas');
-    res.json({ contas: data ?? [] });
+    const contas = await lerTodas(
+      (de, ate) =>
+        db(req)
+          .from(PLANO_TABLE)
+          .select(PLANO_COLS)
+          .eq('client_id', client_id)
+          .order('classificacao', { ascending: true })
+          .order('codigo') // classificação pode repetir (0011)
+          .range(de, ate),
+      'listar plano de contas',
+    );
+    res.json({ contas });
   } catch (err) {
     next(err);
   }
@@ -402,12 +451,12 @@ contabilRouter.post('/plano-contas/importar', upload.single('file'), async (req,
     if (cErr) throw mapPgrstError(cErr, 'validar cliente');
     if (!client) throw notFound('Cliente não encontrado');
 
-    const { data: existentes, error: eErr } = await supabase
-      .from(PLANO_TABLE)
-      .select('codigo')
-      .eq('client_id', dto.client_id);
-    if (eErr) throw mapPgrstError(eErr, 'ler plano de contas atual');
-    const codigosExistentes = new Set((existentes ?? []).map((c) => c.codigo as string));
+    const existentes = await lerTodas(
+      (de, ate) =>
+        supabase.from(PLANO_TABLE).select('codigo').eq('client_id', dto.client_id).order('codigo').range(de, ate),
+      'ler plano de contas atual',
+    );
+    const codigosExistentes = new Set(existentes.map((c) => c.codigo as string));
 
     const parsed = await callPlanoContasParser(
       { buffer: req.file.buffer, originalname: req.file.originalname, mimetype: req.file.mimetype },
@@ -416,6 +465,7 @@ contabilRouter.post('/plano-contas/importar', upload.single('file'), async (req,
     if (!parsed.items.length) {
       throw badRequest('Nenhuma conta encontrada no PDF', { warnings: parsed.warnings });
     }
+    recusarAcimaDoLimite(parsed.items.length, 'O plano de contas');
 
     const rows = parsed.items.map((item) => ({
       owner_id: userId,
@@ -433,16 +483,21 @@ contabilRouter.post('/plano-contas/importar', upload.single('file'), async (req,
 
     await relinkParents(supabase, dto.client_id);
 
-    const { data: contas, error: lErr } = await supabase
-      .from(PLANO_TABLE)
-      .select(PLANO_COLS)
-      .eq('client_id', dto.client_id)
-      .order('classificacao', { ascending: true });
-    if (lErr) throw mapPgrstError(lErr, 'reler plano de contas');
+    const contas = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from(PLANO_TABLE)
+          .select(PLANO_COLS)
+          .eq('client_id', dto.client_id)
+          .order('classificacao', { ascending: true })
+          .order('codigo')
+          .range(de, ate),
+      'reler plano de contas',
+    );
 
     const criadas = parsed.items.filter((i) => !codigosExistentes.has(i.codigo)).length;
     res.status(201).json({
-      contas: contas ?? [],
+      contas,
       warnings: parsed.warnings,
       criadas,
       atualizadas: parsed.items.length - criadas,
@@ -635,6 +690,8 @@ contabilRouter.post('/balancete/importar', upload.single('file'), async (req, re
     if (!parsed.items.length) {
       throw badRequest('Nenhuma conta encontrada no balancete', { warnings: parsed.warnings });
     }
+    // antes do upsert do período: é ele que fecha o mês
+    recusarAcimaDoLimite(parsed.items.length, 'O balancete');
 
     const { data: periodoRow, error: pErr } = await supabase
       .from(PERIODO_TABLE)
@@ -653,19 +710,24 @@ contabilRouter.post('/balancete/importar', upload.single('file'), async (req, re
       .single();
     if (pErr) throw mapPgrstError(pErr, 'gravar período contábil');
 
-    const { data: existentes, error: eErr } = await supabase
-      .from(SALDO_TABLE)
-      .select('codigo')
-      .eq('periodo_id', periodoRow.id);
-    if (eErr) throw mapPgrstError(eErr, 'ler saldos do período');
-    const codigosExistentes = new Set((existentes ?? []).map((s) => s.codigo as string));
+    const existentes = await lerTodas(
+      (de, ate) =>
+        supabase.from(SALDO_TABLE).select('codigo').eq('periodo_id', periodoRow.id).order('codigo').range(de, ate),
+      'ler saldos do período',
+    );
+    const codigosExistentes = new Set(existentes.map((s) => s.codigo as string));
 
-    const { data: plano, error: plErr } = await supabase
-      .from(PLANO_TABLE)
-      .select('id, codigo, tipo')
-      .eq('client_id', dto.client_id);
-    if (plErr) throw mapPgrstError(plErr, 'ler plano de contas do cliente');
-    const planoPorCodigo = new Map((plano ?? []).map((p) => [p.codigo as string, p]));
+    const plano = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from(PLANO_TABLE)
+          .select('id, codigo, tipo')
+          .eq('client_id', dto.client_id)
+          .order('codigo')
+          .range(de, ate),
+      'ler plano de contas do cliente',
+    );
+    const planoPorCodigo = new Map(plano.map((p) => [p.codigo as string, p]));
 
     const warnings = [...parsed.warnings];
     const rows = parsed.items.map((item, ordem) => {
@@ -701,17 +763,12 @@ contabilRouter.post('/balancete/importar', upload.single('file'), async (req, re
       .upsert(rows, { onConflict: 'periodo_id,codigo' });
     if (upErr) throw mapPgrstError(upErr, 'gravar saldos do período');
 
-    const { data: saldos, error: lErr } = await supabase
-      .from(SALDO_TABLE)
-      .select(SALDO_COLS)
-      .eq('periodo_id', periodoRow.id)
-      .order('ordem', { ascending: true });
-    if (lErr) throw mapPgrstError(lErr, 'reler saldos do período');
+    const saldos = await lerSaldos(supabase, periodoRow.id, 'reler saldos do período');
 
     const criadas = parsed.items.filter((i) => !codigosExistentes.has(i.codigo)).length;
     res.status(201).json({
       periodo: periodoRow,
-      saldos: saldos ?? [],
+      saldos,
       warnings,
       criadas,
       atualizadas: parsed.items.length - criadas,
@@ -746,13 +803,7 @@ contabilRouter.get('/periodos', async (req, res, next) => {
 contabilRouter.get('/saldos', async (req, res, next) => {
   try {
     const { periodo_id } = saldosListQuerySchema.parse(req.query);
-    const { data, error } = await db(req)
-      .from(SALDO_TABLE)
-      .select(SALDO_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('ordem', { ascending: true });
-    if (error) throw mapPgrstError(error, 'listar saldos');
-    res.json({ saldos: data ?? [] });
+    res.json({ saldos: await lerSaldos(db(req), periodo_id, 'listar saldos') });
   } catch (err) {
     next(err);
   }
@@ -780,14 +831,7 @@ contabilRouter.post('/saldos/recalcular', async (req, res, next) => {
     if (perErr) throw mapPgrstError(perErr, 'reler período');
     if (!periodo) throw notFound('Período não encontrado');
 
-    const { data: saldos, error: salErr } = await supabase
-      .from(SALDO_TABLE)
-      .select(SALDO_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('ordem', { ascending: true });
-    if (salErr) throw mapPgrstError(salErr, 'reler saldos');
-
-    res.json({ periodo, saldos: saldos ?? [] });
+    res.json({ periodo, saldos: await lerSaldos(supabase, periodo_id, 'reler saldos') });
   } catch (err) {
     next(err);
   }
@@ -863,15 +907,7 @@ contabilRouter.post('/lancamentos', async (req, res, next) => {
 contabilRouter.get('/lancamentos', async (req, res, next) => {
   try {
     const { periodo_id } = lancamentosListQuerySchema.parse(req.query);
-    const { data, error } = await db(req)
-      .from(LANC_TABLE)
-      .select(LANC_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('data', { ascending: true })
-      .order('created_at', { ascending: true })
-      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
-    if (error) throw mapPgrstError(error, 'listar lançamentos');
-    res.json({ lancamentos: ((data ?? []) as unknown as LancamentoRow[]).map(normalizeLancamento) });
+    res.json({ lancamentos: await lerLancamentos(db(req), periodo_id, 'listar lançamentos') });
   } catch (err) {
     next(err);
   }
@@ -1182,19 +1218,14 @@ contabilRouter.get('/relatorios/balancete/pdf', async (req, res, next) => {
     if (perErr) throw mapPgrstError(perErr, 'buscar período do balancete');
     if (!periodo) throw notFound('Período não encontrado');
 
-    const { data: saldos, error: salErr } = await supabase
-      .from(SALDO_TABLE)
-      .select(SALDO_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('ordem', { ascending: true });
-    if (salErr) throw mapPgrstError(salErr, 'ler saldos do balancete');
+    const saldos = await lerSaldos(supabase, periodo_id, 'ler saldos do balancete');
 
     const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
 
     const pdf = await callGerarBalancetePdf({
       cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
       periodo: { ano: periodo.ano as number, mes: periodo.mes as number },
-      linhas: (saldos ?? []).map((s) => toContaItem(s as unknown as ContaItemLike)),
+      linhas: saldos.map((s) => toContaItem(s as unknown as ContaItemLike)),
     });
 
     const filename = nomeArquivoRelatorio('Balancete', cliente.dominio_code, periodo.ano as number, periodo.mes as number);
@@ -1308,23 +1339,14 @@ contabilRouter.get('/relatorios/livro-diario/pdf', async (req, res, next) => {
     if (perErr) throw mapPgrstError(perErr, 'buscar período do livro diário');
     if (!periodo) throw notFound('Período não encontrado');
 
-    const { data: lancs, error: lancsErr } = await supabase
-      .from(LANC_TABLE)
-      .select(LANC_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('data', { ascending: true })
-      .order('created_at', { ascending: true })
-      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
-    if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos do livro diário');
+    const lancs = await lerLancamentos(supabase, periodo_id, 'ler lançamentos do livro diário');
 
     const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
 
     const pdf = await callGerarLivroDiarioPdf({
       cliente: { razao_social: cliente.razao_social, cnpj: cliente.cnpj },
       periodo: { ano: periodo.ano as number, mes: periodo.mes as number },
-      lancamentos: ((lancs ?? []) as unknown as LancamentoRow[])
-        .map(normalizeLancamento)
-        .map((l) => toLivroDiarioLancamento(l as unknown as LivroDiarioLancamentoLike)),
+      lancamentos: lancs.map((l) => toLivroDiarioLancamento(l as unknown as LivroDiarioLancamentoLike)),
     });
 
     const filename = nomeArquivoRelatorio(
@@ -1551,14 +1573,7 @@ contabilRouter.get('/relatorios/exportar-dominio', async (req, res, next) => {
       throw badRequest('Período precisa estar fechado pra exportar — feche o período antes.');
     }
 
-    const { data: lancs, error: lancsErr } = await supabase
-      .from(LANC_TABLE)
-      .select(LANC_COLS)
-      .eq('periodo_id', periodo_id)
-      .order('data', { ascending: true })
-      .order('created_at', { ascending: true })
-      .order('ordem', { ascending: true, foreignTable: PARTIDA_TABLE });
-    if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos pra exportar');
+    const lancs = await lerLancamentos(supabase, periodo_id, 'ler lançamentos pra exportar');
 
     const cliente = await buscarClientePraRelatorio(supabase, periodo.client_id as string);
 
@@ -1576,9 +1591,7 @@ contabilRouter.get('/relatorios/exportar-dominio', async (req, res, next) => {
         periodo_inicio,
         periodo_fim,
         lote_numero,
-        lancamentos: ((lancs ?? []) as unknown as LancamentoRow[])
-          .map(normalizeLancamento)
-          .map((l) => toExportContabilLancamento(l as unknown as ExportContabilLancamentoLike)),
+        lancamentos: lancs.map((l) => toExportContabilLancamento(l as unknown as ExportContabilLancamentoLike)),
       });
     } catch (e) {
       if (e instanceof ExportError) throw badRequest(e.message, e.detalhes);
@@ -1659,20 +1672,25 @@ contabilRouter.post('/lancamentos/importar-transacoes', async (req, res, next) =
 
     let transacoes: TransacaoImportavel[] = [];
     if (statementIds.length > 0) {
-      const { data: txRaw, error: tErr } = await supabase
-        .from('transactions')
-        .select(
-          'id, statement_id, ordem, data, descricao_raw, valor, direction, conta_contabil, ' +
-            'hist_code, hist_complemento',
-        )
-        .in('statement_id', statementIds)
-        .gte('data', inicio)
-        .lte('data', fim)
-        .eq('ignorado', false)
-        .order('data', { ascending: true })
-        .order('ordem', { ascending: true });
-      if (tErr) throw mapPgrstError(tErr, 'ler transações do módulo Importação');
-      transacoes = (txRaw ?? []) as unknown as TransacaoImportavel[];
+      const txRaw = await lerTodas(
+        (de, ate) =>
+          supabase
+            .from('transactions')
+            .select(
+              'id, statement_id, ordem, data, descricao_raw, valor, direction, conta_contabil, ' +
+                'hist_code, hist_complemento',
+            )
+            .in('statement_id', statementIds)
+            .gte('data', inicio)
+            .lte('data', fim)
+            .eq('ignorado', false)
+            .order('data', { ascending: true })
+            .order('ordem', { ascending: true })
+            .order('id')
+            .range(de, ate),
+        'ler transações do módulo Importação',
+      );
+      transacoes = txRaw as unknown as TransacaoImportavel[];
     }
 
     if (transacoes.length === 0) {
@@ -1680,22 +1698,28 @@ contabilRouter.post('/lancamentos/importar-transacoes', async (req, res, next) =
       return;
     }
 
-    const idsTransacoes = transacoes.map((t) => t.id);
-    const { data: jaImportadasRaw, error: jiErr } = await supabase
-      .from(LANC_TABLE)
-      .select('origem_transaction_id')
-      .in('origem_transaction_id', idsTransacoes);
-    if (jiErr) throw mapPgrstError(jiErr, 'verificar transações já importadas');
-    const jaImportadas = new Set(
-      (jaImportadasRaw ?? []).map((l) => l.origem_transaction_id as string),
-    );
+    // em lotes: .in() com os ~1.200 ids de um mês do Mercado Pago estoura a URL
+    const jaImportadas = new Set<string>();
+    for (const lote of emLotes(transacoes.map((t) => t.id))) {
+      const { data: jaImportadasRaw, error: jiErr } = await supabase
+        .from(LANC_TABLE)
+        .select('origem_transaction_id')
+        .in('origem_transaction_id', lote);
+      if (jiErr) throw mapPgrstError(jiErr, 'verificar transações já importadas');
+      for (const l of jaImportadasRaw ?? []) jaImportadas.add(l.origem_transaction_id as string);
+    }
 
-    const { data: contasRaw, error: pcErr } = await supabase
-      .from(PLANO_TABLE)
-      .select('id, codigo, tipo, ativo')
-      .eq('client_id', client_id);
-    if (pcErr) throw mapPgrstError(pcErr, 'ler plano de contas do cliente');
-    const contaPorCodigo = new Map((contasRaw ?? []).map((c) => [c.codigo as string, c]));
+    const contasRaw = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from(PLANO_TABLE)
+          .select('id, codigo, tipo, ativo')
+          .eq('client_id', client_id)
+          .order('codigo')
+          .range(de, ate),
+      'ler plano de contas do cliente',
+    );
+    const contaPorCodigo = new Map(contasRaw.map((c) => [c.codigo as string, c]));
 
     const { data: histRaw, error: hErr } = await supabase.from(HIST_TABLE).select('codigo');
     if (hErr) throw mapPgrstError(hErr, 'ler históricos padrão');

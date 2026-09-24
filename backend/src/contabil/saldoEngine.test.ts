@@ -154,6 +154,33 @@ describe('recomputeSaldosCascade', () => {
     expect(ativo).toMatchObject({ debito_cents: 500, credito_cents: 0, saldo_atual_cents: 10500, saldo_atual_natureza: 'D' });
   });
 
+  it('mais de 100 lançamentos no período: lê as partidas em lotes e soma todas', async () => {
+    // 150 lançamentos de R$ 1,00 a débito do CAIXA em junho — .in() com todos
+    // os ids de uma vez estouraria a URL, então vão em lotes de 100
+    const lancs = Array.from({ length: 150 }, (_, i) => ({ id: `lanc-${i}`, periodo_id: P_JUN.id }));
+    const base = montarHandler({});
+    const { client, ops } = makeFakeSupabase((op) => {
+      if (op.table === 'lancamentos') return { data: lancs, error: null };
+      if (op.table === 'lancamento_partidas') {
+        const ids = (op.filters.find(([c]) => c === 'lancamento_id')?.[1] as string[]) ?? [];
+        const rows = ids.map((id) => ({ lancamento_id: id, plano_conta_id: CONTA_CAIXA.id, tipo: 'D', valor_cents: 100 }));
+        return { data: rows, error: null };
+      }
+      return base(op);
+    });
+    await recomputeSaldosCascade(client, OWNER, P_JUN.id);
+
+    const lotes = ops
+      .filter((o) => o.table === 'lancamento_partidas')
+      .map((o) => (o.filters.find(([c]) => c === 'lancamento_id')?.[1] as string[]).length);
+    expect(lotes).toEqual([100, 50]);
+    const rows = ops.find((o) => o.table === 'saldos_contabeis' && o.verb === 'upsert')?.payload as Array<
+      Record<string, unknown>
+    >;
+    const caixa = rows.find((r) => r.periodo_id === P_JUN.id && r.codigo === '1.1.1')!;
+    expect(caixa).toMatchObject({ debito_cents: 15000, saldo_atual_cents: 25000, saldo_atual_natureza: 'D' });
+  });
+
   it('recalcular um período do MEIO de uma sequência preenche corretamente o período anterior nunca calculado', async () => {
     // Junho nunca foi calculado (nenhum saldos_contabeis pra ele) e chamo
     // recompute direto em Julho — o motor tem que ancorar no fechado (Maio)

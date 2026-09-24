@@ -34,6 +34,14 @@ function handlerFor(map: Record<string, (op: FakeOp) => unknown>): FakeHandler {
   };
 }
 
+/** Linhas servidas como o PostgREST do Supabase: a fatia do .range(), no máximo 1000. */
+function paginado<T>(linhas: T[]) {
+  return (op: FakeOp) => {
+    const [de, ate] = op.range ?? [0, linhas.length - 1];
+    return linhas.slice(de, Math.min(ate + 1, de + 1000));
+  };
+}
+
 const parseResult = {
   format: 'ofx' as const,
   bank_id: '0260',
@@ -262,6 +270,31 @@ describe('POST /statements', () => {
       .attach('file', Buffer.from('x'), 'foto.jpg');
     expect(res.status).toBe(400);
   });
+
+  it('recusa extrato com mais de 10.000 lançamentos antes de gravar qualquer um', async () => {
+    const t = parseResult.transactions[0]!;
+    mockedParser.mockResolvedValue({ ...parseResult, transactions: Array.from({ length: 10_001 }, () => t) });
+    const { app, ops } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1' }),
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': () => null,
+      }),
+    );
+
+    const res = await request(app)
+      .post('/statements')
+      .field('client_id', '11111111-1111-1111-1111-111111111111')
+      .field('banco_conta_contabil', '10002')
+      .attach('file', Buffer.from('OFXHEADER:100\n<OFX></OFX>'), 'e.ofx');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/10\.001 lançamentos — o limite é 10\.000/);
+    expect(ops.some((o) => o.table === 'transactions' && o.verb === 'insert')).toBe(false);
+    expect(
+      ops.some((o) => o.table === 'statements' && (o.payload as { status?: string } | undefined)?.status === 'erro'),
+    ).toBe(true);
+  });
 });
 
 describe('POST /statements/classificar', () => {
@@ -464,6 +497,21 @@ describe('GET /statements/:id', () => {
     const res = await request(app).get('/statements/s1');
     expect(res.status).toBe(404);
   });
+
+  it('devolve o extrato inteiro mesmo passando de 1000 lançamentos (lê em páginas)', async () => {
+    const txns = Array.from({ length: 1211 }, (_, i) => ({ id: `t${i}`, ordem: i }));
+    const { app, ops } = appWith(
+      handlerFor({ 'statements.select': () => ({ id: 's1' }), 'transactions.select': paginado(txns) }),
+    );
+    const res = await request(app).get('/statements/s1');
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1211);
+    expect(res.body.transactions.at(-1)).toEqual({ id: 't1210', ordem: 1210 });
+    expect(ops.filter((o) => o.table === 'transactions').map((o) => o.range)).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+  });
 });
 
 describe('POST /statements/:id/export', () => {
@@ -550,6 +598,32 @@ describe('POST /statements/:id/export', () => {
     const { app } = appWith(handlerFor({ 'statements.select': () => null }));
     const res = await request(app).post('/statements/nope/export');
     expect(res.status).toBe(404);
+  });
+
+  it('o arquivo sai com TODOS os lançamentos, mesmo passando de 1000', async () => {
+    const txns = Array.from({ length: 1211 }, (_, i) => ({
+      ordem: i,
+      data: '2026-07-10',
+      direction: i % 2 ? 'saida' : 'entrada',
+      valor: '1.00',
+      conta_contabil: '272',
+      hist_code: '186',
+      descricao_raw: `LANC ${i}`,
+      hist_complemento: '',
+      ignorado: false,
+    }));
+    const { app } = appWith(
+      handlerFor({
+        'statements.select': () => stmtRow,
+        'transactions.select': paginado(txns),
+        'export_files.insert': () => null,
+        'statements.update': () => ({ id: 's1', status: 'gerado' }),
+      }),
+    );
+    const res = await request(app).post('/statements/s1/export');
+    expect(res.status).toBe(200);
+    // registro 01 + (02 e 03) por lançamento + 99
+    expect(res.headers['x-export-linhas']).toBe(String(1 + 2 * 1211 + 1));
   });
 });
 

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { money } from '../clients/schema.js';
+import { LIMITE_LINHAS } from '../lib/pgrst.js';
 
 const conta = z
   .string()
@@ -80,7 +81,7 @@ export const transactionUpdateSchema = z.object({
 });
 
 export const bulkUpdateTransactionsSchema = z.object({
-  updates: z.array(transactionUpdateSchema).min(1).max(2000),
+  updates: z.array(transactionUpdateSchema).min(1).max(LIMITE_LINHAS),
 });
 
 const classificacaoUpdateItemSchema = z.object({
@@ -89,7 +90,7 @@ const classificacaoUpdateItemSchema = z.object({
 });
 
 export const bulkUpdateClassificacaoSchema = z.object({
-  updates: z.array(classificacaoUpdateItemSchema).min(1).max(2000),
+  updates: z.array(classificacaoUpdateItemSchema).min(1).max(LIMITE_LINHAS),
 });
 
 export type CreateStatement = z.infer<typeof createStatementSchema>;

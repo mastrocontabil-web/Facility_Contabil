@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { emLotes, lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import { aplicarMovimento, type Natureza, type Saldo } from './saldoEngine.js';
 
@@ -8,10 +8,6 @@ const PERIODO_TABLE = 'periodos_contabeis';
 const SALDO_TABLE = 'saldos_contabeis';
 const LANC_TABLE = 'lancamentos';
 const PARTIDA_TABLE = 'lancamento_partidas';
-
-// Mesmo raciocínio do saldoEngine.ts/dreEngine.ts — perto do limite padrão de
-// 1000 linhas do PostgREST se o projeto não configurar db-max-rows.
-const LIMITE_LINHAS = 5000;
 
 type Periodo = {
   id: string;
@@ -124,26 +120,34 @@ export async function montarRazao(
       }
     : { cents: 0, natureza: null };
 
-  const { data: lancsRaw, error: lancsErr } = await supabase
-    .from(LANC_TABLE)
-    .select('id, data, historico_codigo, historico_complemento, created_at')
-    .eq('periodo_id', periodoId)
-    .limit(LIMITE_LINHAS);
-  if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos pro razão');
-  const lancamentos = (lancsRaw ?? []) as LancInfo[];
+  const lancamentos = (await lerTodas(
+    (de, ate) =>
+      supabase
+        .from(LANC_TABLE)
+        .select('id, data, historico_codigo, historico_complemento, created_at')
+        .eq('periodo_id', periodoId)
+        .order('id')
+        .range(de, ate),
+    'ler lançamentos pro razão',
+  )) as LancInfo[];
   const lancamentoPorId = new Map(lancamentos.map((l) => [l.id, l]));
   const lancamentoIds = lancamentos.map((l) => l.id);
 
-  let partidas: PartidaInfo[] = [];
-  if (lancamentoIds.length > 0) {
-    const { data: partidasRaw, error: partidasErr } = await supabase
-      .from(PARTIDA_TABLE)
-      .select('id, lancamento_id, tipo, valor_cents, ordem')
-      .eq('plano_conta_id', planoContaId)
-      .in('lancamento_id', lancamentoIds)
-      .limit(LIMITE_LINHAS);
-    if (partidasErr) throw mapPgrstError(partidasErr, 'ler partidas pro razão');
-    partidas = (partidasRaw ?? []) as PartidaInfo[];
+  // em lotes: .in() com milhares de ids de lançamento estoura a URL
+  const partidas: PartidaInfo[] = [];
+  for (const lote of emLotes(lancamentoIds)) {
+    const doLote = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from(PARTIDA_TABLE)
+          .select('id, lancamento_id, tipo, valor_cents, ordem')
+          .eq('plano_conta_id', planoContaId)
+          .in('lancamento_id', lote)
+          .order('id')
+          .range(de, ate),
+      'ler partidas pro razão',
+    );
+    partidas.push(...(doLote as PartidaInfo[]));
   }
 
   // Ordena por (data, created_at do lançamento, ordem da partida) — três

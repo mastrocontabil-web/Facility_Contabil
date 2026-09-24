@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { emLotes, lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 
 export type Natureza = 'D' | 'C';
@@ -10,12 +10,6 @@ const PERIODO_TABLE = 'periodos_contabeis';
 const SALDO_TABLE = 'saldos_contabeis';
 const LANC_TABLE = 'lancamentos';
 const PARTIDA_TABLE = 'lancamento_partidas';
-
-// Limite generoso — o plano de contas real já tem ~927 contas, perto do
-// default de 1000 linhas do PostgREST se o projeto não configurar
-// db-max-rows. Truncar aqui corrompe número financeiro sem erro nenhum,
-// então prefere um limite explícito alto a confiar no default do servidor.
-const LIMITE_LINHAS = 5000;
 
 function toSigned(s: Saldo): number {
   if (s.natureza === null) return 0;
@@ -122,13 +116,17 @@ export async function recomputeSaldosCascade(
 
   const clientId = alvo.client_id as string;
 
-  const { data: contasRaw, error: contasErr } = await supabase
-    .from(PLANO_TABLE)
-    .select('id, codigo, nome, tipo, classificacao, parent_id')
-    .eq('client_id', clientId)
-    .limit(LIMITE_LINHAS);
-  if (contasErr) throw mapPgrstError(contasErr, 'ler plano de contas pro motor de saldos');
-  const contas = (contasRaw ?? []) as Conta[];
+  // lido inteiro (em páginas): conta faltando aqui corrompe saldo sem erro nenhum
+  const contas = (await lerTodas(
+    (de, ate) =>
+      supabase
+        .from(PLANO_TABLE)
+        .select('id, codigo, nome, tipo, classificacao, parent_id')
+        .eq('client_id', clientId)
+        .order('id')
+        .range(de, ate),
+    'ler plano de contas pro motor de saldos',
+  )) as Conta[];
 
   const posOrdem = ordenarPosOrdem(contas);
   const ordemPorCodigo = ordenarImpressao(contas);
@@ -161,13 +159,17 @@ export async function recomputeSaldosCascade(
   let saldoPorCodigo = new Map<string, Saldo>();
   const ancoraId = ancoraIdx >= 0 ? (periodos[ancoraIdx]?.id ?? null) : null;
   if (ancoraId) {
-    const { data: saldosAncora, error: saErr } = await supabase
-      .from(SALDO_TABLE)
-      .select('codigo, saldo_atual_cents, saldo_atual_natureza')
-      .eq('periodo_id', ancoraId)
-      .limit(LIMITE_LINHAS);
-    if (saErr) throw mapPgrstError(saErr, 'ler saldos do período âncora');
-    for (const row of saldosAncora ?? []) {
+    const saldosAncora = await lerTodas(
+      (de, ate) =>
+        supabase
+          .from(SALDO_TABLE)
+          .select('codigo, saldo_atual_cents, saldo_atual_natureza')
+          .eq('periodo_id', ancoraId)
+          .order('codigo')
+          .range(de, ate),
+      'ler saldos do período âncora',
+    );
+    for (const row of saldosAncora) {
       const cents = row.saldo_atual_cents as number;
       const natureza = row.saldo_atual_natureza as Natureza | null;
       if ((cents === 0) !== (natureza === null)) {
@@ -181,24 +183,33 @@ export async function recomputeSaldosCascade(
   }
 
   const periodoIds = escopo.map((p) => p.id);
-  const { data: lancsRaw, error: lancsErr } = await supabase
-    .from(LANC_TABLE)
-    .select('id, periodo_id')
-    .in('periodo_id', periodoIds)
-    .limit(LIMITE_LINHAS);
-  if (lancsErr) throw mapPgrstError(lancsErr, 'ler lançamentos pro motor de saldos');
-  const periodoDoLancamento = new Map((lancsRaw ?? []).map((l) => [l.id as string, l.periodo_id as string]));
+  const lancsRaw = await lerTodas(
+    (de, ate) =>
+      supabase.from(LANC_TABLE).select('id, periodo_id').in('periodo_id', periodoIds).order('id').range(de, ate),
+    'ler lançamentos pro motor de saldos',
+  );
+  const periodoDoLancamento = new Map(lancsRaw.map((l) => [l.id as string, l.periodo_id as string]));
   const lancamentoIds = [...periodoDoLancamento.keys()];
 
   const movimentoPorPeriodoConta = new Map<string, Map<string, { debito: number; credito: number }>>();
   if (lancamentoIds.length > 0) {
-    const { data: partidasRaw, error: partidasErr } = await supabase
-      .from(PARTIDA_TABLE)
-      .select('lancamento_id, plano_conta_id, tipo, valor_cents')
-      .in('lancamento_id', lancamentoIds)
-      .limit(LIMITE_LINHAS);
-    if (partidasErr) throw mapPgrstError(partidasErr, 'ler partidas pro motor de saldos');
-    for (const p of (partidasRaw ?? []) as Array<{
+    // em lotes: .in() com milhares de ids de lançamento estoura a URL
+    const partidasRaw: unknown[] = [];
+    for (const lote of emLotes(lancamentoIds)) {
+      partidasRaw.push(
+        ...(await lerTodas(
+          (de, ate) =>
+            supabase
+              .from(PARTIDA_TABLE)
+              .select('lancamento_id, plano_conta_id, tipo, valor_cents')
+              .in('lancamento_id', lote)
+              .order('id')
+              .range(de, ate),
+          'ler partidas pro motor de saldos',
+        )),
+      );
+    }
+    for (const p of partidasRaw as Array<{
       lancamento_id: string;
       plano_conta_id: string;
       tipo: Natureza;

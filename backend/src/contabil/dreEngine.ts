@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mapPgrstError } from '../lib/pgrst.js';
+import { lerTodas, mapPgrstError } from '../lib/pgrst.js';
 import { badRequest, notFound } from '../lib/httpError.js';
 import type { Natureza, Saldo } from './saldoEngine.js';
 
@@ -10,10 +10,6 @@ const SALDO_COLS =
   'id, periodo_id, plano_conta_id, codigo, nome, tipo, ordem, saldo_anterior_cents, ' +
   'saldo_anterior_natureza, debito_cents, credito_cents, saldo_atual_cents, ' +
   'saldo_atual_natureza, created_at, updated_at';
-
-// Mesmo raciocínio do saldoEngine.ts: o plano de contas real já tem ~927
-// linhas, perto do limite padrão de 1000 do PostgREST.
-const LIMITE_LINHAS = 5000;
 
 type Periodo = {
   id: string;
@@ -162,30 +158,30 @@ export async function montarDreRelatorio(supabase: SupabaseClient, periodoId: st
   if (!periodo) throw notFound('Período não encontrado');
   const periodoRow = periodo as Periodo;
 
-  const { data: contasRaw, error: contasErr } = await supabase
-    .from(PLANO_TABLE)
-    .select('id, codigo, nome, tipo, grau, parent_id')
-    .eq('client_id', periodoRow.client_id)
-    .limit(LIMITE_LINHAS);
-  if (contasErr) throw mapPgrstError(contasErr, 'ler plano de contas pra DRE');
-  const contas = (contasRaw ?? []) as Conta[];
+  const contas = (await lerTodas(
+    (de, ate) =>
+      supabase
+        .from(PLANO_TABLE)
+        .select('id, codigo, nome, tipo, grau, parent_id')
+        .eq('client_id', periodoRow.client_id)
+        .order('id')
+        .range(de, ate),
+    'ler plano de contas pra DRE',
+  )) as Conta[];
 
   const raizReceitas = encontrarRaizUnica(contas, /RECEITA/i, 'receitas');
   const raizDespesas = encontrarRaizUnica(contas, /DESPESA|CUSTO/i, 'despesas');
   const idsReceitas = coletarDescendentes(contas, raizReceitas.id);
   const idsDespesas = coletarDescendentes(contas, raizDespesas.id);
 
-  // Busca todos os saldos do período de uma vez e particiona em memória — não
-  // dá pra filtrar com .in('plano_conta_id', [...centenas de ids]), risco real
-  // de estourar o tamanho da query string do PostgREST (mesmo raciocínio do
-  // LIMITE_LINHAS do saldoEngine.ts).
-  const { data: saldosRaw, error: saldosErr } = await supabase
-    .from(SALDO_TABLE)
-    .select(SALDO_COLS)
-    .eq('periodo_id', periodoId)
-    .limit(LIMITE_LINHAS);
-  if (saldosErr) throw mapPgrstError(saldosErr, 'ler saldos pra DRE');
-  const saldos = (saldosRaw ?? []) as unknown as SaldoRow[];
+  // Busca todos os saldos do período (em páginas) e particiona em memória —
+  // não dá pra filtrar com .in('plano_conta_id', [...centenas de ids]), risco
+  // real de estourar o tamanho da query string do PostgREST.
+  const saldos = (await lerTodas(
+    (de, ate) =>
+      supabase.from(SALDO_TABLE).select(SALDO_COLS).eq('periodo_id', periodoId).order('codigo').range(de, ate),
+    'ler saldos pra DRE',
+  )) as unknown as SaldoRow[];
   const saldoPorContaId = new Map(
     saldos.filter((s) => s.plano_conta_id).map((s) => [s.plano_conta_id as string, s]),
   );

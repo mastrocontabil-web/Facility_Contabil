@@ -12,6 +12,8 @@ export type FakeOp = {
   /** Todas as chamadas de .order() encadeadas, em ordem (orderBy acima só guarda a última). */
   orderCalls: Array<{ col: string; foreignTable?: string; ascending?: boolean }>;
   limit?: number;
+  /** .range(de, ate) — leitura paginada (lerTodas). */
+  range?: [number, number];
   or?: string;
   onConflict?: string;
   ignoreDuplicates?: boolean;
@@ -110,6 +112,10 @@ export function makeFakeSupabase(
       },
       limit(n: number) {
         op.limit = n;
+        return builder;
+      },
+      range(de: number, ate: number) {
+        op.range = [de, ate];
         return builder;
       },
       single() {
