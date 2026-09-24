@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { formatMoney } from '@/lib/format';
+import { formatMoney, parseMoneyToCents } from '@/lib/format';
 import type { Transaction } from '@/lib/types';
 import { computeSaldo } from './saldo';
 
@@ -62,7 +62,8 @@ export function SaldoReconciliacao({
           <button
             className="btn-primary h-8 px-3"
             onClick={() => {
-              onSaldoInicial(Number(draft.replace(/\./g, '').replace(',', '.')) || 0);
+              // mesma regra do "só ponto" da importação: "1500.50" é decimal, "1.500" é milhar
+              onSaldoInicial(parseMoneyToCents(draft) / 100);
               setEditing(false);
             }}
           >
