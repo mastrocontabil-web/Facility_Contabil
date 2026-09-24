@@ -280,7 +280,7 @@ backend, 26 no parser.
 | Banco | OFX | CSV | PDF |
 |-------|-----|-----|-----|
 | Nubank | ✅ | ✅ | ✅ (layout em prosa) |
-| Banco do Brasil ("Consultas" e app) | ✅ | ✅ | ✅ |
+| Banco do Brasil ("Consultas", app e "Extrato de Conta Corrente") | ✅ | ✅ | ✅ |
 | Itaú | ✅ | — | ✅ |
 | Banco Inter | ✅ | ✅ | ✅ |
 | Bradesco | ✅ | ✅ | ✅ |
@@ -292,6 +292,8 @@ backend, 26 no parser.
 
 Para cada pasta em `C:\SEFIP\EXTRATOS` com OFX, o teste
 `test_sefip_bancos.py` confere que CSV e PDF dão o MESMO resultado do OFX.
+Pasta só com o PDF do BB "Extrato de Conta Corrente" é conferida pelo próprio
+extrato: saldo anterior + entradas − saídas tem que dar o saldo final impresso.
 XLS/XLSX: leitor genérico + detecção de planilha protegida (C6).
 
 ### Bugs corrigidos no caminho

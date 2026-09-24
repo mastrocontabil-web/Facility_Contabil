@@ -167,6 +167,18 @@ def _looks_like_bb_consultas(t: str) -> bool:
     )
 
 
+_BB_CC_HEADER_RE = re.compile(r"\bDia\s+Lote\s+Documento\s+Hist[óo]rico\s+Valor\b")
+_BB_CC_SINAL_RE = re.compile(rf"{_MONEY}\s*\([+-]\)")
+
+
+def _looks_like_bb_extrato_cc(t: str) -> bool:
+    return (
+        "extrato de conta corrente" in t.lower()
+        and bool(_BB_CC_HEADER_RE.search(t))
+        and bool(_BB_CC_SINAL_RE.search(t))
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Nubank — extrato em "prosa"
 # --------------------------------------------------------------------------- #
@@ -342,6 +354,106 @@ def _parse_bb_consultas_pdf(text: str) -> ParseResult:
 
 
 # --------------------------------------------------------------------------- #
+# Banco do Brasil "Extrato de Conta Corrente" — tabela Dia/Lote/Documento/
+# Histórico/Valor, valor com "(+)"/"(-)" e histórico em até 2 linhas. Lido pelas
+# posições na página, não pelo texto corrido: cada lançamento fica entre duas
+# linhas horizontais da tabela, mas as colunas são centralizadas na altura da
+# célula — o título do histórico às vezes fica ACIMA da data (Pix), e no texto
+# corrido as partes de lançamentos vizinhos se misturam.
+# --------------------------------------------------------------------------- #
+_BB_CC_DIRECAO = {"(+)": "entrada", "(-)": "saida"}
+
+
+def _bb_cc_colunas(words: list[dict]) -> tuple[float, dict[str, float]] | None:
+    """Topo da linha de cabeçalho da tabela e x0 das colunas Lote/Documento/Histórico."""
+    for dia in (w for w in words if w["text"] == "Dia"):
+        x: dict[str, float] = {}
+        for w in words:
+            if abs(w["top"] - dia["top"]) >= 2:
+                continue
+            if w["text"] == "Lote":
+                x["lote"] = w["x0"]
+            elif w["text"] == "Documento":
+                x["doc"] = w["x0"]
+            elif re.fullmatch(r"Hist[óo]rico", w["text"]):
+                x["hist"] = w["x0"]
+        if len(x) == 3:
+            return dia["top"], x
+    return None
+
+
+def _parse_bb_extrato_cc_pdf(content: bytes, password: str | None, text: str) -> ParseResult:
+    txns: list[NormalizedTransaction] = []
+    seen: list[date] = []
+    with open_pdf(content, password) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            cab = _bb_cc_colunas(words)
+            if cab is None:
+                continue
+            topo_cab, x = cab
+            seps = sorted(
+                {round(e["top"], 1) for e in page.edges if e["orientation"] == "h" and e["top"] > topo_cab}
+            )
+            seps.append(page.height)
+
+            for a, b in zip(seps, seps[1:]):
+                faixa = [w for w in words if a <= w["top"] < b]
+                sinais = [w for w in faixa if w["text"] in _BB_CC_DIRECAO]
+                if not sinais:
+                    continue
+                sinal = max(sinais, key=lambda w: w["x0"])
+                valores = [
+                    w for w in faixa
+                    if abs(w["top"] - sinal["top"]) < 1.5
+                    and w["x1"] <= sinal["x0"] + 1
+                    and re.fullmatch(_MONEY, w["text"])
+                ]
+                if not valores:
+                    continue
+                valor = max(valores, key=lambda w: w["x0"])
+
+                # "Saldo do dia" vem com data 00/00/0000 (parse_date devolve None)
+                d = next(
+                    (parse_date(w["text"]) for w in faixa if w["x0"] < x["lote"] and re.fullmatch(_DATE, w["text"])),
+                    None,
+                )
+                if d is None:
+                    continue
+
+                linhas: list[list[dict]] = []
+                hist = [w for w in faixa if w["x0"] >= x["hist"] and w is not valor and w is not sinal]
+                for w in sorted(hist, key=lambda w: (w["top"], w["x0"])):
+                    if linhas and abs(linhas[-1][0]["top"] - w["top"]) < 2:
+                        linhas[-1].append(w)
+                    else:
+                        linhas.append([w])
+                desc = " - ".join(
+                    " ".join(w["text"] for w in sorted(linha, key=lambda w: w["x0"])) for linha in linhas
+                )
+                desc = re.sub(r"\s+", " ", desc).strip()
+                val = Decimal(valor["text"].replace(".", "").replace(",", "."))
+                if not desc or val == 0 or _SKIP_DESC.search(desc):
+                    continue
+
+                seen.append(d)
+                txns.append(
+                    NormalizedTransaction(
+                        date=d.isoformat(),
+                        description=desc,
+                        amount_cents=to_cents(val),
+                        direction=_BB_CC_DIRECAO[sinal["text"]],
+                        raw={
+                            "ordem": len(txns),
+                            "lote": " ".join(w["text"] for w in faixa if x["lote"] <= w["x0"] < x["doc"]),
+                            "doc": " ".join(w["text"] for w in faixa if x["doc"] <= w["x0"] < x["hist"]),
+                        },
+                    )
+                )
+    return _result(text, txns, seen)
+
+
+# --------------------------------------------------------------------------- #
 # Layout genérico "assinado": data + descrição + valor (com sinal) [+ saldo]
 # Cobre Bradesco, Inter, C6, Santander, PagBank, BB (app), Itaú, ...
 # --------------------------------------------------------------------------- #
@@ -493,6 +605,10 @@ def parse_pdf(content: bytes, password: str | None = None) -> ParseResult:
         return _parse_nubank_pdf(text)
     if _looks_like_sicoob(text):
         return _parse_sicoob_pdf(text)
+    if _looks_like_bb_extrato_cc(text):
+        r = _parse_bb_extrato_cc_pdf(content, password, text)
+        if r.transactions:
+            return r
     if _looks_like_bb_consultas(text):
         return _parse_bb_consultas_pdf(text)
     return _parse_signed_pdf(text)
