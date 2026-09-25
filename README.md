@@ -1,6 +1,7 @@
 # Facility Contábil
 
-Web app para transformar **extrato bancário** (PDF/OFX/CSV/XLS/XLSX) em **arquivo de
+Web app para transformar **extrato bancário** (PDF/OFX/CSV/XLS/XLSX) — ou a **planilha
+de controle do próprio cliente** (Excel) — em **arquivo de
 importação de lançamentos contábeis em lote** no **Leiaute Domínio Sistemas** — e,
 desde o módulo Contábil, também fazer a **escrituração contábil em partida dobrada**
 por dentro do próprio sistema (plano de contas, lançamentos, saldos e relatórios).
@@ -26,9 +27,18 @@ Depois do login cai num **hub** com quatro módulos:
    **puxa um extrato já classificado** no módulo Classificação, sem reimportar o
    arquivo. O sistema lê os lançamentos, separa entradas/saídas e mostra o
    **saldo bancário acumulado por lançamento** com um painel de conferência —
-   pra bater com o saldo do extrato no fim do mês. O saldo inicial vem
-   **encadeado** do extrato anterior daquele cliente (fecha um mês, abre o
-   próximo).
+   pra bater com o saldo do extrato no fim do mês. O saldo inicial é o
+   digitado na importação, ou o do cadastro do cliente.
+
+   **Planilha de controle do próprio cliente** (Excel) tem submenu próprio —
+   **Nova importação Excel** — separado do extrato de banco: a planilha aparece
+   como está, você escolhe qual coluna é a **data**, o **valor** e o
+   **histórico** (dá pra juntar mais de uma coluna no histórico) e vê na hora o
+   que entra e o que fica de fora. **Valor negativo = saída, positivo =
+   entrada.** Linhas sem data ou sem valor (cabeçalho, títulos, totais) ficam
+   de fora sozinhas; linha de "saldo"/"total" nasce desmarcada; qualquer linha
+   pode ser tirada. Dali segue o mesmo fluxo (Revisão → arquivo do Domínio), e
+   a escolha de colunas volta pronta na próxima planilha do cliente.
 2. **Revisa** — por linha: conta contábil da contrapartida, código de histórico e
    complemento (texto livre). Ações em massa por entrada/saída, e dá pra **inativar**
    lançamentos que não devem ir pro arquivo. Ao salvar, cada classificação vira
@@ -161,7 +171,7 @@ npm run test -w backend
 cd parser && .venv\Scripts\pytest
 ```
 
-Hoje: **289 testes no backend**, **67 no parser**.
+Hoje: **301 testes no backend**, **120 no parser**.
 
 `backend/src/dominio/exporter.test.ts` tem um **golden test** que compara o
 arquivo gerado com um export real do Domínio (roda se `C:\SEFIP\lancto.txt`
@@ -207,6 +217,10 @@ caminho não existe (não quebra em outra máquina).
   arquivo do Domínio. Complemento do arquivo ganha os modos "extrato +
   classificação" e "extrato + complemento + classificação". Classificação em
   uso não pode ser excluída (só desativada).
+- **Nova importação Excel** (2026-09-25) — planilha de controle do cliente com
+  as colunas escolhidas na mão (Data/Valor/Histórico; negativo = saída,
+  positivo = entrada), prévia linha a linha do que entra, escolha gravada por
+  cliente (migration 0018). Segue o fluxo normal da Importação.
 
 **Módulo Contábil (novo, roadmap próprio C1–C11, todos entregues):**
 

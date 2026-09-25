@@ -5,6 +5,7 @@ import { LoginPage } from '@/pages/LoginPage';
 import { HubPage } from '@/pages/HubPage';
 import { ClientsPage } from '@/features/clients/ClientsPage';
 import { ImportPage } from '@/features/import/ImportPage';
+import { ExcelImportPage } from '@/features/import/excel/ExcelImportPage';
 import { RevisaoPage } from '@/features/revisao/RevisaoPage';
 import { HistoricoPage } from '@/features/historico/HistoricoPage';
 import { MemoriaPage } from '@/features/rules/MemoriaPage';
@@ -37,6 +38,7 @@ export function App() {
         <Route path="/clientes" element={<ClientsPage />} />
         <Route path="/memoria" element={<MemoriaPage />} />
         <Route path="/importar" element={<ImportPage />} />
+        <Route path="/importar/excel" element={<ExcelImportPage />} />
         <Route path="/revisao/:id" element={<RevisaoPage />} />
         <Route path="/historico" element={<HistoricoPage />} />
         <Route path="/classificacao" element={<ClassificarPage />} />

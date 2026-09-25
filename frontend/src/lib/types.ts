@@ -32,6 +32,35 @@ export type StatementStatus = 'parsing' | 'classificacao' | 'revisao' | 'gerado'
 export type ComplementoModo = 'extrato' | 'complemento' | 'ambos' | 'extrato_classificacao' | 'tudo';
 export type OrigemModulo = 'importacao' | 'classificacao';
 
+/** Nova importação Excel: função de cada coluna da planilha (índice 0 = coluna A). */
+export type ExcelMapeamento = {
+  aba: number;
+  data: number;
+  valor: number;
+  historico: number[];
+  /** linhas da planilha (1 = primeira) tiradas da importação */
+  excluir: number[];
+};
+
+/** Célula da planilha: o texto, e já lida como data (ISO) e como valor (centavos com sinal) quando der. */
+export type PlanilhaCelula = { t: string; d?: string; v?: number };
+
+/** Linha preenchida da planilha; `n` = número da linha no Excel, `c[i]` = coluna i (null = vazia). */
+export type PlanilhaLinha = { n: number; c: Array<PlanilhaCelula | null> };
+
+/** Uma aba da planilha como grade, pra escolher as colunas. */
+export type Planilha = {
+  formato: 'xls' | 'xlsx';
+  abas: Array<{ nome: string; oculta?: boolean }>;
+  aba: number;
+  colunas: number;
+  linhas: PlanilhaLinha[];
+  total_linhas: number;
+  truncado: boolean;
+  /** colunas achadas pelo cabeçalho (Data/Valor/Histórico) */
+  sugestao?: { data?: number; valor?: number; historico?: number[] };
+};
+
 export type StatementTotais = {
   qtd: number;
   entradas: { n: number; valor_cents: number };
@@ -57,6 +86,8 @@ export type Statement = {
   complemento_modo: ComplementoModo;
   status: StatementStatus;
   origem_modulo: OrigemModulo;
+  /** preenchido só nas importações de planilha Excel com colunas escolhidas na mão */
+  excel_mapeamento: ExcelMapeamento | null;
   erro_msg: string | null;
   totais: StatementTotais | Record<string, never>;
   created_at: string;

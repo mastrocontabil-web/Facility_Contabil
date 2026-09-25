@@ -9,16 +9,34 @@ const ACCEPT = '.pdf,.ofx,.qfx,.csv,.txt,.xls,.xlsx';
 /**
  * Troca o arquivo de uma importação existente. Substitui os lançamentos e volta
  * o extrato pra "em revisão". Cliente, lote e saldo inicial são mantidos.
+ * Importação de planilha Excel (colunas escolhidas na mão) não reimporta — a
+ * leitura automática não sabe as colunas.
  */
 export function ReimportarExtrato({
   statementId,
   qtd,
   as = 'link',
+  excel = false,
 }: {
   statementId: string;
   qtd: number;
   as?: 'link' | 'button';
+  excel?: boolean;
 }) {
+  if (excel) {
+    return (
+      <span
+        className={`cursor-help text-slate-400 ${as === 'button' ? 'btn border border-brand-200 bg-white' : ''}`}
+        title="Importação de planilha Excel: para trocar a planilha, faça uma nova importação Excel."
+      >
+        reimportar
+      </span>
+    );
+  }
+  return <Reimportar statementId={statementId} qtd={qtd} as={as} />;
+}
+
+function Reimportar({ statementId, qtd, as }: { statementId: string; qtd: number; as: 'link' | 'button' }) {
   const navigate = useNavigate();
   const reimport = useReimportStatement(statementId);
   const inputRef = useRef<HTMLInputElement>(null);

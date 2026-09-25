@@ -23,6 +23,9 @@ from app.parsers.pdf import (
     _looks_like_mercadopago,
     extract_pdf_text,
 )
+from app.parsers.planilha import ler_planilha, parse_planilha
+from app.parsers.tabular import _norm
+from app.schemas import ExcelMapeamento
 
 SEFIP = Path(os.getenv("SEFIP_DIR", r"C:\SEFIP\EXTRATOS"))
 
@@ -144,3 +147,45 @@ def test_mercadopago_fecha_com_o_resumo_impresso():
         assert -sai == resumo["Saidas"], f"{onde}: saídas lidas {sai} != impressas {-resumo['Saidas']}"
         assert resumo["Saldo inicial"] + ent - sai == resumo["Saldo final"], f"{onde}: saldo não fecha"
         assert not [w for w in r.warnings if "saldo" in w], f"{onde}: {r.warnings}"
+
+
+# Mesma regra da prévia da tela (frontend/src/features/import/excel/planilha.ts):
+# linha cujo histórico começa com "saldo"/"total" nasce fora da importação.
+_PARECE_SALDO = re.compile(r"^(s\s*a\s*l\s*d\s*o\b(?!\s+de\b)|(sub\s*)?tota(l|is)\b)")
+
+
+def test_planilhas_pela_importacao_excel_batem_com_o_leitor_automatico():
+    """As planilhas de banco da bateria, lidas pela "Nova importação Excel" com as
+    colunas sugeridas pelo cabeçalho (e as linhas de saldo tiradas, como a tela
+    faz), têm que dar os mesmos lançamentos do leitor automático."""
+    casos = [f for pasta in _folders() for f in sorted(pasta.iterdir()) if f.suffix.lower() in (".xlsx", ".xls")]
+    lidos = 0
+    for f in casos:
+        conteudo = f.read_bytes()
+        try:
+            auto = parse_statement(f.name, conteudo)
+            g = ler_planilha(conteudo)
+        except (EncryptedFileError, NotAStatementError):
+            continue
+        onde = f"{f.parent.name}/{f.name}"
+        s = g.sugestao
+        assert s and s.data is not None and s.valor is not None and s.historico, f"{onde}: sem sugestão"
+
+        excluir = []
+        for linha in g.linhas:
+            def cel(i, c=linha.c):
+                return c[i] if i < len(c) else None
+
+            historico = " - ".join(c.t for c in map(cel, s.historico) if c and c.t)
+            if cel(s.data) and cel(s.data).d and cel(s.valor) and cel(s.valor).v and _PARECE_SALDO.match(
+                _norm(historico)
+            ):
+                excluir.append(linha.n)
+
+        mapa = ExcelMapeamento(aba=g.aba, data=s.data, valor=s.valor, historico=s.historico, excluir=excluir)
+        r = parse_planilha(conteudo, mapa)
+        chave = lambda x: [(t.date, t.direction, t.amount_cents) for t in x.transactions]  # noqa: E731
+        assert chave(r) == chave(auto), f"{onde}: importação Excel diverge do leitor automático"
+        lidos += 1
+    if not lidos:
+        pytest.skip("nenhuma planilha legível na bateria")

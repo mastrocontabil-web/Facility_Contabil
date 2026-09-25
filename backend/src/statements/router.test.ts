@@ -2,14 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
-vi.mock('./parserClient.js', () => ({ callParser: vi.fn() }));
-import { callParser } from './parserClient.js';
+vi.mock('./parserClient.js', () => ({ callParser: vi.fn(), callParserExcel: vi.fn(), lerPlanilha: vi.fn() }));
+import { callParser, callParserExcel, lerPlanilha } from './parserClient.js';
 import { statementsRouter } from './router.js';
 import { errorHandler } from '../middleware/error.js';
 import { makeFakeSupabase, type FakeHandler, type FakeOp } from '../test/fakeSupabase.js';
 import { unprocessable } from '../lib/httpError.js';
 
 const mockedParser = vi.mocked(callParser);
+const mockedParserExcel = vi.mocked(callParserExcel);
+const mockedLerPlanilha = vi.mocked(lerPlanilha);
 
 function appWith(handler: FakeHandler) {
   const { client, ops, storageOps } = makeFakeSupabase(handler);
@@ -55,7 +57,11 @@ const parseResult = {
   ],
 };
 
-beforeEach(() => mockedParser.mockReset());
+beforeEach(() => {
+  mockedParser.mockReset();
+  mockedParserExcel.mockReset();
+  mockedLerPlanilha.mockReset();
+});
 
 describe('POST /statements', () => {
   it('sobe o arquivo, chama o parser e devolve status revisao', async () => {
@@ -297,6 +303,240 @@ describe('POST /statements', () => {
   });
 });
 
+// --------------------------------------------------------------------------- #
+// Nova importação Excel
+// --------------------------------------------------------------------------- #
+const CLIENTE = '11111111-1111-1111-1111-111111111111';
+const MAPA = { aba: 0, data: 0, valor: 3, historico: [1, 2], excluir: [4] };
+const planilha = {
+  formato: 'xlsx' as const,
+  abas: [{ nome: 'Agosto' }],
+  aba: 0,
+  colunas: 4,
+  linhas: [
+    { n: 3, c: [{ t: 'Data' }, { t: 'Histórico' }, { t: 'Cliente' }, { t: 'Valor' }] },
+    { n: 5, c: [{ t: '03/08/2026', d: '2026-08-03' }, { t: 'Venda' }, null, { t: '350,5', v: 35050 }] },
+  ],
+  total_linhas: 2,
+  truncado: false,
+  sugestao: { data: 0, valor: 3, historico: [1] },
+};
+
+describe('POST /statements/excel/planilha', () => {
+  it('devolve a aba como grade + as colunas da última importação Excel do cliente, sem gravar nada', async () => {
+    mockedLerPlanilha.mockResolvedValue(planilha);
+    const anterior = { aba: 1, data: 0, valor: 3, historico: [1], excluir: [4] };
+    const { app, ops } = appWith(handlerFor({ 'statements.select': () => ({ excel_mapeamento: anterior }) }));
+
+    const res = await request(app)
+      .post('/statements/excel/planilha')
+      .field('client_id', CLIENTE)
+      .attach('file', Buffer.from('PK'), 'controle.xlsx');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ planilha, mapeamento_anterior: anterior });
+    // sem aba escolhida na tela: abre na aba da última importação
+    expect(mockedLerPlanilha).toHaveBeenCalledWith(expect.objectContaining({ originalname: 'controle.xlsx' }), 1);
+    expect(ops).toHaveLength(1);
+    const [busca] = ops;
+    expect(busca).toMatchObject({ table: 'statements', verb: 'select', limit: 1, single: 'maybeSingle' });
+    expect(busca!.filters).toEqual([['client_id', CLIENTE]]);
+    expect(busca!.notFilters).toEqual([
+      { col: 'excel_mapeamento', op: 'is', val: null },
+      { col: 'status', op: 'eq', val: 'erro' },
+    ]);
+    expect(busca!.orderCalls).toEqual([{ col: 'created_at', ascending: false, foreignTable: undefined }]);
+  });
+
+  it('aba escolhida na tela vale mais que a da última importação', async () => {
+    mockedLerPlanilha.mockResolvedValue(planilha);
+    const { app } = appWith(handlerFor({ 'statements.select': () => ({ excel_mapeamento: { ...MAPA, aba: 2 } }) }));
+    const res = await request(app)
+      .post('/statements/excel/planilha')
+      .field('client_id', CLIENTE)
+      .field('aba', '0')
+      .attach('file', Buffer.from('PK'), 'controle.xlsx');
+    expect(res.status).toBe(200);
+    expect(mockedLerPlanilha).toHaveBeenCalledWith(expect.anything(), 0);
+  });
+
+  it('cliente sem importação Excel anterior (ou sem cliente): só lê a planilha', async () => {
+    mockedLerPlanilha.mockResolvedValue(planilha);
+    const { app, ops } = appWith(handlerFor({ 'statements.select': () => null }));
+
+    const com = await request(app)
+      .post('/statements/excel/planilha')
+      .field('client_id', CLIENTE)
+      .attach('file', Buffer.from('PK'), 'controle.xlsx');
+    expect(com.status).toBe(200);
+    expect(com.body.mapeamento_anterior).toBeNull();
+    expect(mockedLerPlanilha).toHaveBeenLastCalledWith(expect.anything(), undefined);
+
+    const sem = await request(app).post('/statements/excel/planilha').attach('file', Buffer.from('x'), 'c.xls');
+    expect(sem.status).toBe(200);
+    expect(ops).toHaveLength(1); // só a busca do primeiro pedido
+  });
+
+  it('falha ao buscar a última importação não impede de abrir a planilha', async () => {
+    mockedLerPlanilha.mockResolvedValue(planilha);
+    const { app } = appWith(() => ({ data: null, error: { message: 'boom', code: 'XX000' } }));
+    const res = await request(app)
+      .post('/statements/excel/planilha')
+      .field('client_id', CLIENTE)
+      .attach('file', Buffer.from('PK'), 'controle.xlsx');
+    expect(res.status).toBe(200);
+    expect(res.body.mapeamento_anterior).toBeNull();
+  });
+
+  it('400 quando o arquivo não é planilha Excel', async () => {
+    const { app } = appWith(handlerFor({}));
+    for (const nome of ['extrato.pdf', 'extrato.csv', 'extrato.ofx']) {
+      const res = await request(app).post('/statements/excel/planilha').attach('file', Buffer.from('x'), nome);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/planilha Excel/);
+    }
+    expect(mockedLerPlanilha).not.toHaveBeenCalled();
+  });
+
+  it('erro de leitura da planilha (ex.: senha) sobe como 422', async () => {
+    mockedLerPlanilha.mockRejectedValue(unprocessable('planilha protegida por senha', { code: 'encrypted' }));
+    const { app } = appWith(handlerFor({}));
+    const res = await request(app).post('/statements/excel/planilha').attach('file', Buffer.from('x'), 'c.xlsx');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/senha/);
+  });
+});
+
+describe('POST /statements/excel', () => {
+  const lidos = {
+    ...parseResult,
+    format: 'xlsx' as const,
+    bank_id: null,
+    account_id: null,
+    warnings: ['1 linha(s) tiradas da importação por você: 4'],
+  };
+
+  function importar(app: express.Express, mapeamento: unknown = MAPA, nome = 'controle.xlsx') {
+    return request(app)
+      .post('/statements/excel')
+      .field('client_id', CLIENTE)
+      .field('banco_conta_contabil', '10002')
+      .field('mapeamento', typeof mapeamento === 'string' ? mapeamento : JSON.stringify(mapeamento))
+      .attach('file', Buffer.from('PK'), nome);
+  }
+
+  it('lê pelas colunas escolhidas, guarda a escolha no extrato e segue pra revisão', async () => {
+    mockedParserExcel.mockResolvedValue(lidos);
+    const { app, ops, storageOps } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1', saldo_inicial: '100.00' }),
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': (op) => ({ id: 's1', status: 'revisao', ...(op.payload as object) }),
+        'transactions.insert': () => null,
+        'transactions.select': () => [
+          { id: 't1', ordem: 0, direction: 'saida' },
+          { id: 't2', ordem: 1, direction: 'entrada' },
+        ],
+      }),
+    );
+
+    const res = await importar(app);
+
+    expect(res.status).toBe(201);
+    expect(res.body.statement.status).toBe('revisao');
+    expect(res.body.transactions).toHaveLength(2);
+    expect(res.body.warnings).toEqual(lidos.warnings);
+    expect(mockedParser).not.toHaveBeenCalled();
+    expect(mockedParserExcel).toHaveBeenCalledWith(expect.objectContaining({ originalname: 'controle.xlsx' }), MAPA);
+    expect(storageOps[0]).toMatchObject({ bucket: 'statements', action: 'upload' });
+
+    const insert = ops.find((o) => o.table === 'statements' && o.verb === 'insert');
+    expect(insert?.payload).toMatchObject({
+      formato: 'xlsx',
+      banco_conta_contabil: '10002',
+      saldo_inicial: 100,
+      status: 'parsing',
+      excel_mapeamento: MAPA,
+    });
+    const rows = ops.find((o) => o.table === 'transactions' && o.verb === 'insert')?.payload as Array<
+      Record<string, unknown>
+    >;
+    expect(rows.map((r) => [r.direction, r.valor, r.hist_code])).toEqual([
+      ['saida', '10.00', '186'],
+      ['entrada', '2340.55', '138'],
+    ]);
+  });
+
+  it('.xls fica como xls, .xlsm como xlsx; sem "excluir" grava lista vazia', async () => {
+    mockedParserExcel.mockResolvedValue(lidos);
+    const { app, ops } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1' }),
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': () => ({ id: 's1', status: 'revisao' }),
+        'transactions.select': () => [],
+      }),
+    );
+    const semExcluir = { aba: 0, data: 0, valor: 3, historico: [1, 2] };
+    expect((await importar(app, semExcluir, 'controle.xls')).status).toBe(201);
+    expect((await importar(app, MAPA, 'controle.xlsm')).status).toBe(201);
+    const inserts = ops.filter((o) => o.table === 'statements' && o.verb === 'insert');
+    expect(inserts.map((o) => (o.payload as { formato: string }).formato)).toEqual(['xls', 'xlsx']);
+    expect((inserts[0]!.payload as { excel_mapeamento: unknown }).excel_mapeamento).toEqual({
+      ...semExcluir,
+      excluir: [],
+    });
+  });
+
+  it('400 quando a escolha de colunas não serve — antes de criar o extrato', async () => {
+    const { app, ops } = appWith(handlerFor({ 'clients.select': () => ({ id: 'c1' }) }));
+    const invalidos = [
+      '{nao é json',
+      { ...MAPA, valor: 0 }, // Data e Valor na mesma coluna
+      { ...MAPA, historico: [1, 3] }, // Valor também como histórico
+      { ...MAPA, historico: [] }, // sem histórico
+      { aba: 0, valor: 3, historico: [1] }, // sem data
+      { ...MAPA, data: 60 }, // além da última coluna que a tela mostra
+    ];
+    for (const m of invalidos) {
+      const res = await importar(app, m);
+      expect(res.status, JSON.stringify(m)).toBe(400);
+    }
+    expect(ops.some((o) => o.table === 'statements')).toBe(false);
+    expect(mockedParserExcel).not.toHaveBeenCalled();
+  });
+
+  it('400 quando o arquivo não é planilha Excel', async () => {
+    const { app } = appWith(handlerFor({ 'clients.select': () => ({ id: 'c1' }) }));
+    const res = await importar(app, MAPA, 'extrato.csv');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/planilha Excel/);
+    expect(mockedParserExcel).not.toHaveBeenCalled();
+  });
+
+  it('nenhum lançamento nas colunas escolhidas: extrato vira erro com o motivo do leitor', async () => {
+    mockedParserExcel.mockResolvedValue({
+      ...lidos,
+      transactions: [],
+      warnings: ['40 linha(s) sem data na coluna B ficaram de fora (cabeçalho, títulos...): 1, 2, 3'],
+    });
+    const { app, ops } = appWith(
+      handlerFor({
+        'clients.select': () => ({ id: 'c1' }),
+        'statements.insert': () => ({ id: 's1' }),
+        'statements.update': () => null,
+      }),
+    );
+    const res = await importar(app);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sem data na coluna B/);
+    expect(ops.some((o) => o.table === 'transactions')).toBe(false);
+    expect(
+      ops.some((o) => o.table === 'statements' && (o.payload as { status?: string } | undefined)?.status === 'erro'),
+    ).toBe(true);
+  });
+});
+
 describe('POST /statements/classificar', () => {
   it('sobe o arquivo sem conta do banco, cria com origem_modulo=classificacao', async () => {
     mockedParser.mockResolvedValue(parseResult);
@@ -450,6 +690,30 @@ describe('POST /statements/:id/reimport', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.statement.status).toBe('classificacao');
+  });
+
+  it('extrato da Nova importação Excel não é relido pela leitura automática', async () => {
+    const { app, ops, storageOps } = appWith(
+      handlerFor({
+        'statements.select': () => ({
+          id: 's1',
+          client_id: 'c1',
+          hist_code_entrada: '138',
+          hist_code_saida: '186',
+          saldo_inicial: '0',
+          status: 'revisao',
+          excel_mapeamento: { aba: 0, data: 0, valor: 3, historico: [1], excluir: [] },
+        }),
+      }),
+    );
+    const res = await request(app)
+      .post('/statements/s1/reimport')
+      .attach('file', Buffer.from('PK'), 'controle-setembro.xlsx');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/nova importação Excel/);
+    expect(mockedParser).not.toHaveBeenCalled();
+    expect(storageOps).toHaveLength(0);
+    expect(ops.some((o) => o.table === 'transactions')).toBe(false);
   });
 
   it('erro do parser marca status erro e NÃO apaga os lançamentos', async () => {

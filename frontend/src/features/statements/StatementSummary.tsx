@@ -51,16 +51,18 @@ function Info({
   tone?: 'green' | 'red';
 }) {
   return (
-    <div>
+    // min-w-0 + overflow-wrap: nome de arquivo sem espaço ("financeiro_20260902.xlsx")
+    // quebra dentro da coluna em vez de invadir a do lado
+    <div className="min-w-0">
       <p className="text-xs uppercase text-slate-400">{label}</p>
       <p
-        className={
+        className={`[overflow-wrap:anywhere] ${
           tone === 'green'
             ? 'font-medium text-green-700'
             : tone === 'red'
               ? 'font-medium text-red-700'
               : 'font-medium text-slate-800'
-        }
+        }`}
       >
         {value}
       </p>

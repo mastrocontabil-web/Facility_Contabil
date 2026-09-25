@@ -1,20 +1,49 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiDownload, saveBlob } from '@/lib/api';
-import type { ComplementoModo, OrigemModulo, Statement, StatementStatus, Transaction } from '@/lib/types';
+import type {
+  ComplementoModo,
+  ExcelMapeamento,
+  OrigemModulo,
+  Planilha,
+  Statement,
+  StatementStatus,
+  Transaction,
+} from '@/lib/types';
 
 export type StatementDetail = { statement: Statement; transactions: Transaction[] };
 export type ImportResult = StatementDetail & { warnings: string[] };
 
-export type CreateStatementInput = {
+/** Cabeçalho de uma importação nova — o mesmo pro extrato e pra planilha Excel. */
+export type CabecalhoInput = {
   client_id: string;
   banco_conta_contabil: string;
   hist_code_entrada?: string;
   hist_code_saida?: string;
   lote_numero?: number;
   saldo_inicial?: string;
+};
+
+export type CreateStatementInput = CabecalhoInput & {
   pdf_password?: string;
   file: File;
 };
+
+export type CreateStatementExcelInput = CabecalhoInput & {
+  file: File;
+  mapeamento: ExcelMapeamento;
+};
+
+function formCabecalho(input: CabecalhoInput & { file: File }): FormData {
+  const fd = new FormData();
+  fd.append('file', input.file);
+  fd.append('client_id', input.client_id);
+  fd.append('banco_conta_contabil', input.banco_conta_contabil);
+  if (input.hist_code_entrada) fd.append('hist_code_entrada', input.hist_code_entrada);
+  if (input.hist_code_saida) fd.append('hist_code_saida', input.hist_code_saida);
+  if (input.lote_numero != null) fd.append('lote_numero', String(input.lote_numero));
+  if (input.saldo_inicial != null) fd.append('saldo_inicial', input.saldo_inicial);
+  return fd;
+}
 
 export function useStatements(
   filter: { client_id?: string; status?: string; origem_modulo?: OrigemModulo } = {},
@@ -45,16 +74,41 @@ export function useCreateStatement() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: CreateStatementInput) => {
-      const fd = new FormData();
-      fd.append('file', input.file);
-      fd.append('client_id', input.client_id);
-      fd.append('banco_conta_contabil', input.banco_conta_contabil);
-      if (input.hist_code_entrada) fd.append('hist_code_entrada', input.hist_code_entrada);
-      if (input.hist_code_saida) fd.append('hist_code_saida', input.hist_code_saida);
-      if (input.lote_numero != null) fd.append('lote_numero', String(input.lote_numero));
-      if (input.saldo_inicial != null) fd.append('saldo_inicial', input.saldo_inicial);
+      const fd = formCabecalho(input);
       if (input.pdf_password) fd.append('pdf_password', input.pdf_password);
       return api<ImportResult>('/api/statements', { method: 'POST', body: fd });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statements'] }),
+  });
+}
+
+export type LerPlanilhaResult = {
+  planilha: Planilha;
+  /** colunas da última importação Excel do cliente (null se nunca teve) */
+  mapeamento_anterior: ExcelMapeamento | null;
+};
+
+/** Nova importação Excel, etapa 1: lê a aba pra escolher as colunas (não grava nada). */
+export function useLerPlanilha() {
+  return useMutation({
+    mutationFn: (input: { file: File; client_id?: string; aba?: number }) => {
+      const fd = new FormData();
+      fd.append('file', input.file);
+      if (input.client_id) fd.append('client_id', input.client_id);
+      if (input.aba != null) fd.append('aba', String(input.aba));
+      return api<LerPlanilhaResult>('/api/statements/excel/planilha', { method: 'POST', body: fd });
+    },
+  });
+}
+
+/** Nova importação Excel, etapa 2: importa pelas colunas escolhidas (segue pra Revisão). */
+export function useCreateStatementExcel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateStatementExcelInput) => {
+      const fd = formCabecalho(input);
+      fd.append('mapeamento', JSON.stringify(input.mapeamento));
+      return api<ImportResult>('/api/statements/excel', { method: 'POST', body: fd });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statements'] }),
   });

@@ -20,11 +20,12 @@ export const MODULES: ModuleDef[] = [
   {
     id: 'importacao',
     label: 'Importação',
-    description: 'Escolhe o cliente, importa o extrato (ou puxa do módulo Classificação), define a conta contábil de cada lançamento e gera o arquivo do Domínio.',
+    description: 'Escolhe o cliente, importa o extrato (ou a planilha Excel do cliente, ou puxa do módulo Classificação), define a conta contábil de cada lançamento e gera o arquivo do Domínio.',
     home: '/importar',
     match: (p) => p.startsWith('/importar') || p.startsWith('/historico') || p.startsWith('/memoria') || p.startsWith('/revisao'),
     nav: [
       { to: '/importar', label: 'Nova importação' },
+      { to: '/importar/excel', label: 'Nova importação Excel' },
       { to: '/historico', label: 'Histórico' },
       { to: '/memoria', label: 'Memória' },
     ],

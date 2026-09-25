@@ -187,7 +187,11 @@ export function HistoricoPage() {
                       {s.status !== 'parsing' && (
                         <>
                           <span className="mx-2 text-slate-300">·</span>
-                          <ReimportarExtrato statementId={s.id} qtd={totais?.qtd ?? 0} />
+                          <ReimportarExtrato
+                            statementId={s.id}
+                            qtd={totais?.qtd ?? 0}
+                            excel={!!s.excel_mapeamento}
+                          />
                         </>
                       )}
                       <button

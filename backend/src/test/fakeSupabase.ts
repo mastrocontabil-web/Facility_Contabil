@@ -6,6 +6,8 @@ export type FakeOp = {
   filters: Array<[string, unknown]>;
   /** Filtros de intervalo (.gte()/.lte()), separados de `filters` (que é sempre igualdade/`in`). */
   rangeFilters: Array<{ op: 'gte' | 'lte'; col: string; val: unknown }>;
+  /** Filtros de negação: .neq(col, val) e .not(col, operador, val). */
+  notFilters: Array<{ col: string; op: string; val: unknown }>;
   payload?: unknown;
   single?: 'single' | 'maybeSingle' | null;
   orderBy?: string;
@@ -35,7 +37,7 @@ export type FakeRpcHandler = (op: FakeRpcOp) => FakeResult;
 
 /**
  * Mock encadeável do supabase-js suficiente pros routers (select/insert/update/
- * delete + eq/or/order/limit/single/maybeSingle). O handler recebe a operação
+ * delete + eq/neq/not/or/order/limit/single/maybeSingle). O handler recebe a operação
  * montada e devolve { data, error, count }.
  */
 export function makeFakeSupabase(
@@ -101,6 +103,14 @@ export function makeFakeSupabase(
         op.rangeFilters.push({ op: 'lte', col, val });
         return builder;
       },
+      neq(col: string, val: unknown) {
+        op.notFilters.push({ col, op: 'eq', val });
+        return builder;
+      },
+      not(col: string, operador: string, val: unknown) {
+        op.notFilters.push({ col, op: operador, val });
+        return builder;
+      },
       or(expr: string) {
         op.or = expr;
         return builder;
@@ -162,7 +172,7 @@ export function makeFakeSupabase(
 
   const client = {
     from(table: string) {
-      return makeBuilder({ table, verb: 'select', filters: [], rangeFilters: [], orderCalls: [] });
+      return makeBuilder({ table, verb: 'select', filters: [], rangeFilters: [], notFilters: [], orderCalls: [] });
     },
     storage: { from: storageBucket },
     async rpc(fn: string, args: Record<string, unknown>) {

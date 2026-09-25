@@ -226,6 +226,38 @@ pesado. Reformulado pra **aprender sozinho**:
   openpyxl). `test_sefip_bancos.py` agora cobre todas as pastas, não só as
   com OFX. Repo publicado no GitHub (histórico zerado, sem dado de cliente).
 
+## Nova importação Excel — entregue (2026-09-25)
+
+Planilha de controle interno do próprio cliente, separada da importação de
+extrato (PDF/OFX/CSV) — submenu próprio no módulo Importação (`/importar/excel`).
+Nada de adivinhar layout: o operador diz qual coluna é Data, Valor e Histórico.
+
+- **Etapa 1** — `POST /api/statements/excel/planilha` → parser
+  `/excel/planilha`: a aba como grade, cada célula com o texto e já lida como
+  data (`d`: data de verdade, texto dd/mm/aa[aa]/ISO ou nº de série) e valor
+  (`v`, centavos com sinal: número, `R$ -1.234,56`, `(1.234,56)`,
+  `1.234,56-`, sufixo D/C). Mesclagem vertical repete a data nas linhas
+  cobertas, nunca o valor. Não grava nada.
+- **Etapa 2** — a tela mostra a planilha com um seletor por coluna (Histórico
+  pode ter várias colunas — os textos são juntados) e, em cada linha, como ela
+  vai entrar. `POST /api/statements/excel` → parser `/parse/excel` → o mesmo
+  `gravarLancamentos` da importação normal → Revisão, memória e arquivo do
+  Domínio como sempre.
+- **Regra do sinal**: valor negativo = saída, positivo = entrada. Sem data, sem
+  valor ou valor zero → fora sozinha. Histórico começando com "saldo"/"total"
+  (mas não "saldo de…", ex. saldo de salário) nasce fora e o operador marca de
+  volta se for lançamento; qualquer linha pode ser tirada (vai em `excluir`).
+- A prévia (`features/import/excel/planilha.ts`) aplica a escolha sobre as
+  células já lidas pelo parser, na mesma ordem de checagem do
+  `parse_planilha` — conferido que bate com o gravado; as planilhas de banco
+  da bateria `C:SEFIPEXTRATOS` lidas por aqui dão os mesmos lançamentos do
+  leitor automático.
+- A escolha fica no extrato (`statements.excel_mapeamento`, migration 0018): a
+  próxima planilha do cliente abre com as mesmas colunas; sem histórico,
+  sugere pelo cabeçalho. Reimportar um extrato desses é bloqueado (a leitura
+  automática não sabe as colunas) — trocar a planilha = nova importação Excel.
+- .xlsx, .xlsm e .xls (Excel 97-2003); até 10.000 lançamentos.
+
 ## Onde paramos (2026-09-04)
 
 M1–M7 prontos. `npm run dev` (3 serviços) ou `iniciar.bat`. 95 testes no
@@ -316,4 +348,7 @@ XLS/XLSX: leitor genérico + detecção de planilha protegida (C6).
   — confirmar no primeiro import real. Ver `docs/leiaute-dominio.md`.
 - Largura do código de conta reduzido (default 7) — pode variar por plano de contas.
 - PDF de bancos não listados acima: melhor esforço, com aviso pra conferir.
-- XLS/XLSX genérico é fraco em planilhas com layout incomum.
+- XLS/XLSX genérico é fraco em planilhas com layout incomum — planilha de
+  controle do cliente vai pela **Nova importação Excel** (colunas escolhidas na
+  mão). Planilha com colunas separadas de entrada e saída ainda não é aceita
+  lá (só uma coluna de valor com sinal).

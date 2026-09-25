@@ -24,6 +24,48 @@ export const createStatementSchema = z.object({
   pdf_password: z.string().max(200).optional(),
 });
 
+/** Até onde a tela mostra colunas da planilha (A…BH) — igual ao parser. */
+const MAX_COLUNAS = 60;
+const coluna = z.number().int().min(0).max(MAX_COLUNAS - 1);
+
+/** Nova importação Excel: função de cada coluna (índice 0 = coluna A). */
+export const excelMapeamentoSchema = z
+  .object({
+    aba: z.number().int().min(0).max(255),
+    data: coluna,
+    valor: coluna,
+    historico: z.array(coluna).min(1, 'escolha a coluna do histórico').max(MAX_COLUNAS),
+    /** linhas da planilha (1 = primeira) que o operador tirou da importação */
+    excluir: z.array(z.number().int().min(1)).max(20_000).default([]),
+  })
+  .refine(
+    (m) => m.data !== m.valor && !m.historico.includes(m.data) && !m.historico.includes(m.valor),
+    'cada coluna só pode ter uma função (Data, Valor ou Histórico)',
+  );
+
+export type ExcelMapeamento = z.infer<typeof excelMapeamentoSchema>;
+
+/** Campo JSON dentro do multipart. */
+const json = z.string().transform((s, ctx) => {
+  try {
+    return JSON.parse(s) as unknown;
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'JSON inválido' });
+    return z.NEVER;
+  }
+});
+
+/** POST /api/statements/excel/planilha — lê a planilha pra escolher as colunas. */
+export const lerPlanilhaSchema = z.object({
+  client_id: z.string().uuid().optional(),
+  aba: z.coerce.number().int().min(0).max(255).optional(),
+});
+
+/** POST /api/statements/excel — mesmo cabeçalho da importação + as colunas escolhidas. */
+export const createStatementExcelSchema = createStatementSchema.omit({ pdf_password: true }).extend({
+  mapeamento: json.pipe(excelMapeamentoSchema),
+});
+
 /** POST /api/statements/classificar — só o essencial; conta do banco e hist
  *  ficam pra quando o extrato for "puxado" pro módulo Importação. */
 export const classificarStatementSchema = z.object({

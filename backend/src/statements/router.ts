@@ -8,11 +8,15 @@ import {
   bulkUpdateClassificacaoSchema,
   bulkUpdateTransactionsSchema,
   classificarStatementSchema,
+  createStatementExcelSchema,
   createStatementSchema,
+  lerPlanilhaSchema,
   listStatementsQuerySchema,
   updateStatementSchema,
+  type CreateStatement,
+  type ExcelMapeamento,
 } from './schema.js';
-import { callParser, type ParseResult } from './parserClient.js';
+import { callParser, callParserExcel, lerPlanilha, type ParseResult } from './parserClient.js';
 import { classify, memoryKey, type Rule } from '../rules/match.js';
 import { buildDominioFile, ExportError, type ExportLancamento } from '../dominio/exporter.js';
 import type { ComplementoModo } from '../dominio/complemento.js';
@@ -24,7 +28,7 @@ const upload = multer({
 
 const BUCKET = 'statements';
 const STMT_COLS =
-  'id, client_id, arquivo_nome, storage_path, formato, banco_id, conta_ofx, period_start, period_end, banco_conta_contabil, hist_code_entrada, hist_code_saida, lote_numero, saldo_inicial, saldo_final, complemento_modo, status, origem_modulo, erro_msg, totais, created_at, updated_at';
+  'id, client_id, arquivo_nome, storage_path, formato, banco_id, conta_ofx, period_start, period_end, banco_conta_contabil, hist_code_entrada, hist_code_saida, lote_numero, saldo_inicial, saldo_final, complemento_modo, status, origem_modulo, excel_mapeamento, erro_msg, totais, created_at, updated_at';
 const TXN_COLS =
   'id, ordem, data, descricao_raw, valor, direction, conta_contabil, hist_code, hist_complemento, cod_complemento_hist, ignorado, regra_id, origem_preenchimento, classificacao_id';
 
@@ -56,6 +60,14 @@ const EXT_TO_FORMAT: Record<string, string> = {
 function detectFormat(filename: string): string | null {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';
   return EXT_TO_FORMAT[ext] ?? null;
+}
+
+/** Nova importação Excel: só planilha (.xlsm é .xlsx com macro — lido igual). */
+function formatoPlanilha(filename: string): 'xls' | 'xlsx' | null {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  if (ext === 'xls') return 'xls';
+  if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx';
+  return null;
 }
 
 function sanitizeName(name: string): string {
@@ -193,14 +205,114 @@ async function gravarLancamentos(
   return { statement, transactions };
 }
 
+/**
+ * Importação nova no módulo Importação (extrato lido automaticamente ou
+ * planilha Excel com as colunas escolhidas): cria o extrato, guarda o arquivo,
+ * lê com `ler` e grava os lançamentos. Se a leitura falha ou não serve, o
+ * extrato fica com status 'erro' (aparece no Histórico) e o erro sobe.
+ */
+async function novaImportacao(
+  supabase: SupabaseClient,
+  p: {
+    userId: string;
+    file: Express.Multer.File;
+    dto: Omit<CreateStatement, 'pdf_password'>;
+    formato: string;
+    ler: () => Promise<ParseResult>;
+    /** colunas a mais no insert do extrato (ex.: excel_mapeamento) */
+    extras?: Record<string, unknown>;
+  },
+) {
+  const { userId, file, dto, formato } = p;
+
+  // cliente existe / é do usuário
+  const { data: client, error: cErr } = await supabase
+    .from('clients')
+    .select('id, saldo_inicial')
+    .eq('id', dto.client_id)
+    .maybeSingle();
+  if (cErr) throw mapPgrstError(cErr, 'validar cliente');
+  if (!client) throw notFound('Cliente não encontrado');
+
+  // Só o que o operador informou: digitado na importação, senão o do cadastro.
+  // Não encadeia do saldo final do extrato anterior — isso trazia saldo de
+  // outro mês/conta sem o operador perceber.
+  const saldoInicial = dto.saldo_inicial ?? Number(client.saldo_inicial ?? 0);
+
+  // cria o statement (parsing)
+  const { data: stmt, error: sErr } = await supabase
+    .from('statements')
+    .insert({
+      owner_id: userId,
+      client_id: dto.client_id,
+      arquivo_nome: file.originalname,
+      formato,
+      banco_conta_contabil: dto.banco_conta_contabil,
+      hist_code_entrada: dto.hist_code_entrada,
+      hist_code_saida: dto.hist_code_saida,
+      lote_numero: dto.lote_numero,
+      saldo_inicial: saldoInicial,
+      status: 'parsing',
+      ...p.extras,
+    })
+    .select('id')
+    .single();
+  if (sErr) throw mapPgrstError(sErr, 'criar importação');
+  const statementId = stmt.id as string;
+
+  // upload no storage
+  const path = `${userId}/${statementId}/${sanitizeName(file.originalname)}`;
+  const { error: upErr } = await supabase.storage
+    .from(BUCKET)
+    .upload(path, file.buffer, { contentType: file.mimetype, upsert: true });
+  if (upErr) {
+    logger.warn({ upErr }, 'falha ao subir arquivo no storage (segue mesmo assim)');
+  } else {
+    await supabase.from('statements').update({ storage_path: path }).eq('id', statementId);
+  }
+
+  // parser
+  let parsed: ParseResult | null = null;
+  let parseErr: unknown = null;
+  try {
+    parsed = await p.ler();
+  } catch (e) {
+    parseErr = e;
+  }
+
+  const recusa = motivoRecusa(parseErr, parsed);
+  if (recusa || !parsed) {
+    const msg = recusa ?? 'falha ao ler o extrato';
+    await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
+    throw parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] });
+  }
+
+  const { statement, transactions } = await gravarLancamentos(supabase, {
+    ownerId: userId,
+    statementId,
+    clientId: dto.client_id,
+    histEntrada: dto.hist_code_entrada,
+    histSaida: dto.hist_code_saida,
+    saldoInicial,
+    parsed,
+    arquivoNome: file.originalname,
+    formato,
+    storagePath: upErr ? null : path,
+    statusFinal: 'revisao',
+  });
+
+  return { statement, transactions, warnings: parsed.warnings };
+}
+
+/** O arquivo do upload no formato que o parserClient espera. */
+function arquivo(file: Express.Multer.File) {
+  return { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype };
+}
+
 // --------------------------------------------------------------------------- #
 // POST /  — upload + parse
 // --------------------------------------------------------------------------- #
 statementsRouter.post('/', upload.single('file'), async (req, res, next) => {
-  const supabase = db(req);
-  const userId = req.auth!.userId;
-  let statementId: string | null = null;
-
   try {
     if (!req.file) throw badRequest('Arquivo do extrato é obrigatório (campo "file")');
     const dto = createStatementSchema.parse(req.body);
@@ -210,86 +322,82 @@ statementsRouter.post('/', upload.single('file'), async (req, res, next) => {
       throw badRequest('Formato não reconhecido — use PDF, OFX, CSV, XLS ou XLSX');
     }
 
-    // cliente existe / é do usuário
-    const { data: client, error: cErr } = await supabase
-      .from('clients')
-      .select('id, saldo_inicial')
-      .eq('id', dto.client_id)
-      .maybeSingle();
-    if (cErr) throw mapPgrstError(cErr, 'validar cliente');
-    if (!client) throw notFound('Cliente não encontrado');
-
-    // Só o que o operador informou: digitado na importação, senão o do cadastro.
-    // Não encadeia do saldo final do extrato anterior — isso trazia saldo de
-    // outro mês/conta sem o operador perceber.
-    const saldoInicial = dto.saldo_inicial ?? Number(client.saldo_inicial ?? 0);
-
-    // cria o statement (parsing)
-    const { data: stmt, error: sErr } = await supabase
-      .from('statements')
-      .insert({
-        owner_id: userId,
-        client_id: dto.client_id,
-        arquivo_nome: req.file.originalname,
-        formato,
-        banco_conta_contabil: dto.banco_conta_contabil,
-        hist_code_entrada: dto.hist_code_entrada,
-        hist_code_saida: dto.hist_code_saida,
-        lote_numero: dto.lote_numero,
-        saldo_inicial: saldoInicial,
-        status: 'parsing',
-      })
-      .select('id')
-      .single();
-    if (sErr) throw mapPgrstError(sErr, 'criar importação');
-    statementId = stmt.id as string;
-
-    // upload no storage
-    const path = `${userId}/${statementId}/${sanitizeName(req.file.originalname)}`;
-    const { error: upErr } = await supabase.storage
-      .from(BUCKET)
-      .upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
-    if (upErr) {
-      logger.warn({ upErr }, 'falha ao subir arquivo no storage (segue mesmo assim)');
-    } else {
-      await supabase.from('statements').update({ storage_path: path }).eq('id', statementId);
-    }
-
-    // parser
-    let parsed: ParseResult | null = null;
-    let parseErr: unknown = null;
-    try {
-      parsed = await callParser(
-        { buffer: req.file.buffer, originalname: req.file.originalname, mimetype: req.file.mimetype },
-        { pdfPassword: dto.pdf_password },
-      );
-    } catch (e) {
-      parseErr = e;
-    }
-
-    const recusa = motivoRecusa(parseErr, parsed);
-    if (recusa || !parsed) {
-      const msg = recusa ?? 'falha ao ler o extrato';
-      await supabase.from('statements').update({ status: 'erro', erro_msg: msg }).eq('id', statementId);
-      next(parseErr ?? badRequest(msg, { warnings: parsed?.warnings ?? [] }));
-      return;
-    }
-
-    const { statement, transactions } = await gravarLancamentos(supabase, {
-      ownerId: userId,
-      statementId,
-      clientId: dto.client_id,
-      histEntrada: dto.hist_code_entrada,
-      histSaida: dto.hist_code_saida,
-      saldoInicial,
-      parsed,
-      arquivoNome: req.file.originalname,
+    const file = req.file;
+    const out = await novaImportacao(db(req), {
+      userId: req.auth!.userId,
+      file,
+      dto,
       formato,
-      storagePath: upErr ? null : path,
-      statusFinal: 'revisao',
+      ler: () => callParser(arquivo(file), { pdfPassword: dto.pdf_password }),
     });
+    res.status(201).json(out);
+  } catch (err) {
+    next(err);
+  }
+});
 
-    res.status(201).json({ statement, transactions, warnings: parsed.warnings });
+// --------------------------------------------------------------------------- #
+// Nova importação Excel — planilha própria do cliente (controle interno), com o
+// operador dizendo qual coluna é Data, Valor e Histórico. Separada da leitura
+// automática: nada de adivinhar layout. Valor negativo = saída, positivo = entrada.
+// --------------------------------------------------------------------------- #
+
+/** Colunas da última importação Excel do cliente — a próxima planilha abre com elas. */
+async function mapeamentoAnterior(supabase: SupabaseClient, clientId: string): Promise<ExcelMapeamento | null> {
+  const { data, error } = await supabase
+    .from('statements')
+    .select('excel_mapeamento')
+    .eq('client_id', clientId)
+    .not('excel_mapeamento', 'is', null)
+    .neq('status', 'erro')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  // só ajuda a pré-preencher: se a leitura falhar, a tela abre sem ela
+  if (error) {
+    logger.warn({ err: error }, 'falha ao ler a última importação Excel do cliente (segue sem)');
+    return null;
+  }
+  return (data?.excel_mapeamento as ExcelMapeamento | null | undefined) ?? null;
+}
+
+// POST /excel/planilha — a aba como grade, pra escolher as colunas (não grava nada)
+statementsRouter.post('/excel/planilha', upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) throw badRequest('Arquivo da planilha é obrigatório (campo "file")');
+    const dto = lerPlanilhaSchema.parse(req.body);
+    if (!formatoPlanilha(req.file.originalname)) {
+      throw badRequest('Envie uma planilha Excel (.xls ou .xlsx)');
+    }
+
+    const anterior = dto.client_id ? await mapeamentoAnterior(db(req), dto.client_id) : null;
+    // sem aba escolhida: a da última importação do cliente (o parser volta pra
+    // aba ativa se essa não existir na planilha nova)
+    const planilha = await lerPlanilha(arquivo(req.file), dto.aba ?? anterior?.aba);
+    res.json({ planilha, mapeamento_anterior: anterior });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /excel — importa pelas colunas escolhidas e segue o fluxo normal (Revisão)
+statementsRouter.post('/excel', upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) throw badRequest('Arquivo da planilha é obrigatório (campo "file")');
+    const dto = createStatementExcelSchema.parse(req.body);
+    const formato = formatoPlanilha(req.file.originalname);
+    if (!formato) throw badRequest('Envie uma planilha Excel (.xls ou .xlsx)');
+
+    const file = req.file;
+    const out = await novaImportacao(db(req), {
+      userId: req.auth!.userId,
+      file,
+      dto,
+      formato,
+      ler: () => callParserExcel(arquivo(file), dto.mapeamento),
+      extras: { excel_mapeamento: dto.mapeamento },
+    });
+    res.status(201).json(out);
   } catch (err) {
     next(err);
   }
@@ -407,11 +515,19 @@ statementsRouter.post('/:id/reimport', upload.single('file'), async (req, res, n
 
     const { data: stmt, error: sErr } = await supabase
       .from('statements')
-      .select('id, client_id, hist_code_entrada, hist_code_saida, saldo_inicial, status')
+      .select('id, client_id, hist_code_entrada, hist_code_saida, saldo_inicial, status, excel_mapeamento')
       .eq('id', statementId)
       .maybeSingle();
     if (sErr) throw mapPgrstError(sErr, 'buscar importação');
     if (!stmt) throw notFound('Importação não encontrada');
+    // A leitura automática não sabe as colunas escolhidas na mão — numa planilha
+    // de controle do cliente ela adivinharia errado sem avisar.
+    if (stmt.excel_mapeamento) {
+      throw badRequest(
+        'Essa importação veio de uma planilha Excel com as colunas escolhidas na mão — ' +
+          'para trocar a planilha, faça uma nova importação Excel.',
+      );
+    }
     // Reimportar não "adianta" o fluxo: se ainda está no módulo Classificação,
     // continua lá; só quem já foi puxado pra Importação (revisao) permanece assim.
     const statusFinal = stmt.status === 'classificacao' ? 'classificacao' : 'revisao';

@@ -144,7 +144,12 @@ export function RevisaoPage() {
           >
             Voltar
           </button>
-          <ReimportarExtrato statementId={id} qtd={transactions.length} as="button" />
+          <ReimportarExtrato
+            statementId={id}
+            qtd={transactions.length}
+            as="button"
+            excel={!!st.excel_mapeamento}
+          />
           <button className="btn-primary" onClick={onSave} disabled={!isDirty || save.isPending}>
             {save.isPending ? 'Salvando…' : isDirty ? `Salvar (${changes.length})` : 'Salvo'}
           </button>

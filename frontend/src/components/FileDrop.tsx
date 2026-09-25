@@ -5,9 +5,15 @@ const ACCEPT = '.pdf,.ofx,.qfx,.csv,.txt,.xls,.xlsx';
 export function FileDrop({
   file,
   onFile,
+  accept = ACCEPT,
+  titulo = 'Arraste o extrato aqui ou clique para escolher',
+  formatos = 'PDF, OFX, CSV, XLS ou XLSX',
 }: {
   file: File | null;
   onFile: (f: File | null) => void;
+  accept?: string;
+  titulo?: string;
+  formatos?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -33,7 +39,7 @@ export function FileDrop({
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPT}
+        accept={accept}
         className="hidden"
         onChange={(e) => onFile(e.target.files?.[0] ?? null)}
       />
@@ -54,8 +60,8 @@ export function FileDrop({
         </div>
       ) : (
         <div className="text-slate-500">
-          <p className="font-medium">Arraste o extrato aqui ou clique para escolher</p>
-          <p className="mt-1 text-xs">PDF, OFX, CSV, XLS ou XLSX</p>
+          <p className="font-medium">{titulo}</p>
+          <p className="mt-1 text-xs">{formatos}</p>
         </div>
       )}
     </div>
